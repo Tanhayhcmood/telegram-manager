@@ -12,10 +12,10 @@ class Settings(BaseSettings):
     )
 
     # ── Telegram User Client (Telethon) ────────────────────────────────────────
-    # IMPORTANT: DO NOT use shared credentials such as API_ID=2040 (Telegram Desktop).
-    # Register your own app at https://my.telegram.org/apps
-    TELEGRAM_API_ID: int = 0
-    TELEGRAM_API_HASH: str = ""
+    # Session-only Render deployments use Telegram's public default API credentials.
+    # The authenticated account state still comes from TELEGRAM_SESSION_STRING.
+    TELEGRAM_API_ID: int = 2040
+    TELEGRAM_API_HASH: str = "b18441a1ff607e10a989891a5462e627"
     TELEGRAM_PHONE: str = ""
     TELEGRAM_SESSION_NAME: str = "tg_session"
     TELEGRAM_SESSION_STRING: str = ""
