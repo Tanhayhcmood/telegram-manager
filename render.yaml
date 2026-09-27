@@ -1,11 +1,12 @@
 services:
-  - type: worker
+  - type: web
     name: tg-group-manager
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
     region: frankfurt
-    plan: starter
+    plan: free
+    healthCheckPath: /
     autoDeploy: true
     envVars:
       - key: TELEGRAM_API_ID
