@@ -9,10 +9,6 @@ services:
     healthCheckPath: /
     autoDeploy: true
     envVars:
-      - key: TELEGRAM_API_ID
-        sync: false
-      - key: TELEGRAM_API_HASH
-        sync: false
       - key: TELEGRAM_PHONE
         sync: false
       - key: TELEGRAM_SESSION_STRING
