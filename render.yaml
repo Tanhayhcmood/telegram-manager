@@ -76,7 +76,7 @@ services:
 
   - type: redis
     name: tg-manager-redis
-    plan: starter
+    plan: free
     region: frankfurt
     maxmemoryPolicy: noeviction
     ipAllowList: []
@@ -85,5 +85,5 @@ databases:
   - name: tg-manager-db
     databaseName: tgmanager
     user: tgmanager
-    plan: starter
+    plan: free
     region: frankfurt
