@@ -36,6 +36,13 @@ async def cb_stats(callback: CallbackQuery) -> None:
 
     queue_in_memory = s.join_queue_size
     queue_in_db = s.pending_queue_size
+    consistency_line = (
+        f"  🔗 هماهنگی Telegram/DB: ✅ برابر ({s.live_group_count})"
+        if s.live_group_count is not None and s.live_group_count == s.joined_groups
+        else f"  🔗 هماهنگی Telegram/DB: ⚠️ اختلاف ({s.live_group_count} در Telegram / {s.joined_groups} در DB)"
+        if s.live_group_count is not None
+        else "  🔗 هماهنگی Telegram/DB: ⚠️ snapshot زنده در دسترس نیست"
+    )
 
     text = (
         "📊 <b>آمار لحظه‌ای سیستم</b>\n"
@@ -45,6 +52,7 @@ async def cb_stats(callback: CallbackQuery) -> None:
         f"  کل ثبت‌شده: <code>{s.total_groups}</code>\n"
         f"  عضو فعلی در Telegram: <code>{s.live_group_count if s.live_group_count is not None else '—'}</code>\n"
         f"  🟢 عضو شده: <code>{s.joined_groups}</code>\n"
+        f"{consistency_line}\n"
         f"  ✅ امروز: <code>{s.today_joins}</code> گروه\n"
         f"  ⏳ در صف (دیتابیس): <code>{queue_in_db}</code> | (حافظه): <code>{queue_in_memory}</code>\n"
         f"  🔴 ناموفق: <code>{s.failed_groups}</code>\n\n"

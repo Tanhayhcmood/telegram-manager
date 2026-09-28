@@ -27,6 +27,7 @@ from app.services import (
     ForcedSubscribeService,
     RuntimeConfigService,
 )
+from app.web_dashboard import DashboardServer
 
 logger = get_logger(__name__)
 _shutdown_event = asyncio.Event()
@@ -151,39 +152,11 @@ async def _build_storage():
     return MemoryStorage()
 
 
-async def _http_health_handler(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-) -> None:
-    """Respond to any HTTP request with 200 OK — used by Render health checks."""
-    try:
-        await asyncio.wait_for(reader.read(4096), timeout=5.0)
-    except Exception:
-        pass
-    response = (
-        b"HTTP/1.1 200 OK\r\n"
-        b"Content-Type: text/plain\r\n"
-        b"Content-Length: 2\r\n"
-        b"Connection: close\r\n"
-        b"\r\n"
-        b"OK"
-    )
-    try:
-        writer.write(response)
-        await writer.drain()
-        writer.close()
-        await writer.wait_closed()
-    except Exception:
-        pass
-
-
-async def _start_health_server() -> asyncio.Server:
-    """Start a minimal HTTP server so Render web service health checks pass."""
+async def _start_health_server() -> DashboardServer:
+    """Start the dashboard and health server used by Render."""
     port = int(os.getenv("PORT", "10000"))
-    server = await asyncio.start_server(
-        _http_health_handler, "0.0.0.0", port
-    )
-    logger.info("Health server listening on port %d", port)
+    server = DashboardServer()
+    await server.start(port)
     return server
 
 
@@ -221,6 +194,8 @@ async def main() -> None:
         health_http_server.close()
         await health_http_server.wait_closed()
         raise
+
+    health_http_server.mark_ready()
 
     bot = Bot(
         token=settings.BOT_TOKEN,

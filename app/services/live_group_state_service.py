@@ -9,6 +9,8 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+LIVE_REFRESH_CACHE_SECONDS = 15.0
+
 
 @dataclass(frozen=True)
 class LiveGroupRefresh:
@@ -44,7 +46,7 @@ class LiveGroupStateService:
         now = loop.time()
         if (
             self._last_result is not None
-            and now - self._last_refresh_monotonic < 1.0
+            and now - self._last_refresh_monotonic < LIVE_REFRESH_CACHE_SECONDS
         ):
             return self._last_result
 
@@ -52,7 +54,7 @@ class LiveGroupStateService:
             now = loop.time()
             if (
                 self._last_result is not None
-                and now - self._last_refresh_monotonic < 1.0
+                and now - self._last_refresh_monotonic < LIVE_REFRESH_CACHE_SECONDS
             ):
                 return self._last_result
 

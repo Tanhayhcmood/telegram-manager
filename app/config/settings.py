@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     APP_ENV: str = "production"
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool = True
+    # Optional bearer token for the read-only web dashboard. Empty keeps the
+    # report public; set it in Render when the panel must be private.
+    DASHBOARD_TOKEN: str = ""
 
     # ── Rate limiting ──────────────────────────────────────────────────────────
     RATE_LIMIT_MESSAGES: int = 30

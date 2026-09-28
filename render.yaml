@@ -17,6 +17,8 @@ services:
         sync: false
       - key: ADMIN_IDS
         sync: false
+      - key: DASHBOARD_TOKEN
+        sync: false
       - key: DATABASE_URL
         fromDatabase:
           name: tg-manager-db
