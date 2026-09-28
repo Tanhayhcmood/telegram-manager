@@ -50,6 +50,11 @@ _MAX_BROADCAST_SECONDS: int = 3600
 _GROUP_WRITE_RESTRICTED_MARKERS = (
     "user_banned_in_channel",
     "chat_write_forbidden",
+    # Telegram can reject a post even when the account is still a member:
+    # paid-message chats and globally restricted chats are not broadcastable.
+    "allow_payment_required",
+    "chat is restricted",
+    "chat_restricted",
 )
 
 # Failure reasons that mean the group/chat itself is gone or the account was
@@ -63,6 +68,7 @@ _GROUP_UNREACHABLE_MARKERS = (
     "usernotparticipant",
     "chat_id_invalid",
     "peer_id_invalid",
+    "invalid peer",
     "kicked",
 )
 
@@ -469,7 +475,16 @@ class BroadcastQueueService:
 
         job.total = len(target_groups)
         actor = str(job.actor_id)
-        live_cnt = len(dialog_groups)
+        # Count only destinations that will actually be attempted.  The live
+        # dialog list also contains write-restricted groups that were skipped
+        # above; counting all dialogs here made the progress message report an
+        # impossible negative DB-only count.
+        live_target_ids = {
+            group["group_id"]
+            for group in target_groups
+            if group["group_id"] in dialog_ids
+        }
+        live_cnt = len(live_target_ids)
         db_only_cnt = job.total - live_cnt
         logger.info(
             "Broadcast job %s: %d groups (live=%d db_only=%d)",
