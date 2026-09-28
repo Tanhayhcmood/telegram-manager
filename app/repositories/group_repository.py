@@ -32,11 +32,17 @@ class GroupRepository(BaseRepository[Group]):
         )
         return result.scalar_one_or_none()
 
-    async def get_by_status(self, status: GroupStatus, limit: int = 50) -> list[Group]:
+    async def get_by_status(
+        self,
+        status: GroupStatus,
+        limit: int = 50,
+        oldest_first: bool = False,
+    ) -> list[Group]:
+        order = Group.created_at.asc() if oldest_first else Group.created_at.desc()
         result = await self._session.execute(
             select(Group)
             .where(Group.status == status)
-            .order_by(Group.created_at.desc())
+            .order_by(order)
             .limit(limit)
         )
         return list(result.scalars().all())

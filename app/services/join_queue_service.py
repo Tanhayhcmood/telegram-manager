@@ -223,7 +223,11 @@ class JoinQueueService:
             async with AsyncSessionLocal() as session:
                 repo = GroupRepository(session)
                 attempt_repo = JoinAttemptRepository(session)
-                pending = await repo.get_by_status(GroupStatus.PENDING, limit=1000)
+                pending = await repo.get_by_status(
+                    GroupStatus.PENDING,
+                    limit=1000,
+                    oldest_first=True,
+                )
                 approved = await repo.get_by_status(GroupStatus.APPROVED, limit=500)
 
                 # For APPROVED groups, distinguish two cases:
@@ -415,22 +419,37 @@ class JoinQueueService:
             )
             return
 
-        success, real_group_id, join_error = await self._tg.join_group(task.link)
+        # The queue's randomized delay is the throttle for queued joins.
+        # Direct/forced-subscribe callers keep TelegramUserService's global
+        # throttle enabled through its default argument.
+        success, real_group_id, join_error = await self._tg.join_group(
+            task.link,
+            enforce_throttle=False,
+        )
 
-        # ── Handle FloodWait: re-queue with delay instead of marking FAILED ────
+        # ── Handle FloodWait: stop the entire consumer before continuing ───────
         if not success and join_error and join_error.startswith("flood_wait:"):
             try:
                 wait_secs = int(join_error.split(":")[1].rstrip("s"))
             except (IndexError, ValueError):
                 wait_secs = 3600  # safe fallback: 1 hour
+            total_wait = wait_secs + settings.FLOOD_WAIT_MARGIN_SECONDS
 
             logger.warning(
-                "FloodWait for group_id=%d (%r): scheduling retry in %d seconds (~%.1fh)",
-                task.group_id, task.title, wait_secs, wait_secs / 3600,
+                "FloodWait for group_id=%d (%r): pausing entire queue for %d seconds "
+                "(telegram=%d margin=%d)",
+                task.group_id,
+                task.title,
+                total_wait,
+                wait_secs,
+                settings.FLOOD_WAIT_MARGIN_SECONDS,
             )
-            asyncio.create_task(
-                self._requeue_after_delay(task, wait_secs),
-                name=f"flood-requeue-{task.group_id}",
+            await asyncio.sleep(total_wait)
+            await self.enqueue(
+                group_id=task.group_id,
+                link=task.link,
+                title=task.title,
+                attempt=task.attempt_number + 1,
             )
             # Keep DB status as PENDING — group is not failed, just rate-limited
             return
@@ -464,6 +483,57 @@ class JoinQueueService:
                 pass
             # Keep DB status as PENDING — not a permanent failure
             return
+
+        # A username can resolve to a User/Bot or a disallowed broadcast
+        # channel. This is a terminal classification, not a failed join.
+        if not success and join_error == "skipped_not_group":
+            async with AsyncSessionLocal() as session:
+                link_repo = DiscoveredLinkRepository(session)
+                log_repo = LogRepository(session)
+                discovered_link = await link_repo.get_by_link(task.link)
+                if discovered_link:
+                    discovered_link.status = LinkStatus.SKIPPED_NOT_GROUP
+                    discovered_link.notes = "Resolved entity is not an allowed group/channel"
+                await log_repo.add(
+                    action="group_join_skipped_not_group",
+                    result="skipped",
+                    target=task.link,
+                    details=f"group_id={real_group_id or task.group_id}",
+                )
+                await session.commit()
+            logger.info(
+                "join_skipped_not_group group_id=%d link=%s",
+                real_group_id or task.group_id,
+                task.link,
+            )
+            return
+
+        # Network and unknown errors are retryable with bounded exponential
+        # backoff. The attempt is recorded before the delayed requeue.
+        if not success and join_error and join_error.startswith("retryable:"):
+            if task.attempt_number < settings.RETRY_MAX_ATTEMPTS:
+                self._daily_join_count += 1
+                delay = min(
+                    settings.RETRY_BACKOFF_BASE_SECONDS * (2 ** (task.attempt_number - 1)),
+                    settings.RETRY_BACKOFF_MAX_SECONDS,
+                )
+                await self._record_retryable_attempt(task, join_error)
+                logger.warning(
+                    "Retryable join error group_id=%d attempt=%d/%d: retrying in %ds",
+                    task.group_id,
+                    task.attempt_number,
+                    settings.RETRY_MAX_ATTEMPTS,
+                    delay,
+                )
+                asyncio.create_task(
+                    self._requeue_after_delay(
+                        task,
+                        delay,
+                        attempt=task.attempt_number + 1,
+                    ),
+                    name=f"retryable-requeue-{task.group_id}",
+                )
+                return
 
         # ── Increment daily counter on every actual join attempt ───────────────
         # (regardless of success — each attempt consumes part of the daily quota)
@@ -503,16 +573,16 @@ class JoinQueueService:
             )
 
             if group:
-                # ── BUG FIX: groups requiring Telegram admin approval (صفحه درخواست عضویت)
+                # ── Groups requiring Telegram admin approval ───────────────────
                 # When InviteRequestSentError is raised, join_group() returns success=True
-                # with join_error='request_pending_approval'.  This does NOT mean the account
+                # with join_error='request_sent'.  This does NOT mean the account
                 # is in the group — it means a request was submitted.  JoinApprovalWatcher
                 # watches for the ChatAction approval event and sets status → JOINED then.
                 # Previously this set status=JOINED immediately, which was wrong.
-                if join_error == "request_pending_approval":
+                if join_error == "request_sent":
                     group.status = GroupStatus.APPROVED  # awaiting Telegram admin approval
                     if discovered_link:
-                        discovered_link.status = LinkStatus.APPROVED
+                        discovered_link.status = LinkStatus.REQUEST_SENT
                     logger.info(
                         "group_id=%d (%r): join request sent — status=APPROVED (awaiting Telegram admin)",
                         task.group_id, task.title,
@@ -528,7 +598,7 @@ class JoinQueueService:
                     if discovered_link:
                         discovered_link.status = LinkStatus.FAILED
 
-                if join_error == "request_pending_approval":
+                if join_error == "request_sent":
                     log_action = "group_join_requested"
                     log_result = "success"
                 elif success:
@@ -548,7 +618,7 @@ class JoinQueueService:
                         f"daily={self._daily_join_count}/{settings.MAX_JOINS_PER_DAY}"
                     ),
                 )
-                if join_error == "request_pending_approval":
+                if join_error == "request_sent":
                     logger.info(
                         "📨 Join request sent for group_id=%d (%r) — awaiting Telegram admin approval",
                         real_group_id or task.group_id, task.title
@@ -564,15 +634,16 @@ class JoinQueueService:
             elif discovered_link:
                 discovered_link.status = (
                     LinkStatus.JOINED if success
-                    else LinkStatus.APPROVED if join_error == "request_pending_approval"
+                    else LinkStatus.REQUEST_SENT if join_error == "request_sent"
+                    else LinkStatus.EXPIRED if join_error and join_error.startswith("expired:")
                     else LinkStatus.FAILED
                 )
 
             await session.commit()
 
         # Notify admins: only on FAILED joins.
-        # request_pending_approval is NOT a failure — it's a pending approval.
-        is_request_pending = (join_error == "request_pending_approval")
+        # request_sent is NOT a failure — it's a pending approval.
+        is_request_pending = (join_error == "request_sent")
         if settings.get_admin_id_list() and not success and not is_request_pending:
             await self._notify_admins(task, success)
 
@@ -580,7 +651,45 @@ class JoinQueueService:
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _requeue_after_delay(self, task: JoinTask, delay: float) -> None:
+    async def _record_retryable_attempt(self, task: JoinTask, error: str) -> None:
+        async with AsyncSessionLocal() as session:
+            group_repo = GroupRepository(session)
+            link_repo = DiscoveredLinkRepository(session)
+            log_repo = LogRepository(session)
+            attempt_repo = JoinAttemptRepository(session)
+
+            await attempt_repo.add(
+                group_id=task.group_id,
+                invite_link=task.link,
+                attempt_number=task.attempt_number,
+                success=False,
+                error=error,
+            )
+            group = await group_repo.get_by_group_id(task.group_id)
+            if group:
+                group.status = GroupStatus.PENDING
+            discovered_link = await link_repo.get_by_link(task.link)
+            if discovered_link:
+                discovered_link.status = LinkStatus.PENDING
+                discovered_link.notes = error
+            await log_repo.add(
+                action="group_join_retry_scheduled",
+                result="retryable",
+                target=task.link,
+                details=(
+                    f"group_id={task.group_id} attempt={task.attempt_number} "
+                    f"daily={self._daily_join_count}/{settings.MAX_JOINS_PER_DAY} "
+                    f"error={error}"
+                ),
+            )
+            await session.commit()
+
+    async def _requeue_after_delay(
+        self,
+        task: JoinTask,
+        delay: float,
+        attempt: int | None = None,
+    ) -> None:
         """Sleep delay seconds then re-enqueue the task."""
         await asyncio.sleep(delay)
         logger.info(
@@ -591,7 +700,7 @@ class JoinQueueService:
             group_id=task.group_id,
             link=task.link,
             title=task.title,
-            attempt=task.attempt_number,
+            attempt=attempt if attempt is not None else task.attempt_number,
         )
 
     async def _notify_daily_limit(self, task: JoinTask, wait_secs: float) -> None:

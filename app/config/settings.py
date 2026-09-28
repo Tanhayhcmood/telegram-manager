@@ -60,11 +60,15 @@ class Settings(BaseSettings):
     DISCOVERY_KEYWORDS: str = ""
 
     # ── Daily join limit ───────────────────────────────────────────────────────
-    MAX_JOINS_PER_DAY: int = 30
+    MAX_JOINS_PER_DAY: int = 8
 
     # ── Join queue anti-detection delays ───────────────────────────────────────
-    JOIN_DELAY_MIN: int = 3600
-    JOIN_DELAY_MAX: int = 4500
+    JOIN_DELAY_MIN: int = 2400
+    JOIN_DELAY_MAX: int = 5400
+    FLOOD_WAIT_MARGIN_SECONDS: int = 30
+    JOIN_GROUPS_ONLY: bool = True
+    RETRY_BACKOFF_BASE_SECONDS: int = 60
+    RETRY_BACKOFF_MAX_SECONDS: int = 3600
 
     # ── Auto-retry for failed joins ────────────────────────────────────────────
     RETRY_FAILED_JOINS: bool = True

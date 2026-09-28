@@ -1,6 +1,5 @@
 import asyncio
 import random
-import re
 from io import BytesIO
 from typing import Any
 from telethon import TelegramClient, events
@@ -17,17 +16,18 @@ from telethon.errors import (
     ChannelPrivateError,
     ChatAdminRequiredError,
     UserBannedInChannelError,
+    InviteHashExpiredError,
+    InviteHashInvalidError,
+    UsernameNotOccupiedError,
+    UsernameInvalidError,
+    ChannelsTooMuchError,
 )
 
 from app.config import settings
 from app.utils.logger import get_logger
+from app.utils.validators import LinkValidator
 
 logger = get_logger(__name__)
-
-_PRIVATE_INVITE_RE = re.compile(
-    r"(?:t\.me|telegram\.me|telegram\.dog)/(?:joinchat/|join/|\+)([a-zA-Z0-9_-]+)",
-    re.I,
-)
 
 # Media types that support a caption field in Telethon send_file
 _CAPTIONABLE = {"photo", "video", "document", "audio", "animation"}
@@ -104,8 +104,8 @@ class TelegramUserService:
     # could fire several joins seconds apart -- independent of the main
     # queue's pacing -- creating a burst pattern that looks like spam to
     # Telegram and triggers temporary restrictions / soft-bans.
-    _GLOBAL_JOIN_MIN_GAP = 90.0   # seconds
-    _GLOBAL_JOIN_MAX_GAP = 180.0  # seconds
+    _GLOBAL_JOIN_MIN_GAP = 2400.0   # 40 minutes
+    _GLOBAL_JOIN_MAX_GAP = 5400.0   # 90 minutes
 
     def __init__(self) -> None:
         session = (
@@ -203,22 +203,23 @@ class TelegramUserService:
         """Resolve a Telegram link to an entity.
         Supports both public username links and private invite links.
         """
+        parsed = LinkValidator.parse(link)
+        if parsed is None:
+            raise ValueError(f"Unsupported Telegram link: {link}")
+
         try:
-            m = _PRIVATE_INVITE_RE.search(link)
-            if m:
-                invite_hash = m.group(1)
-                try:
-                    from telethon.tl.functions.messages import CheckChatInviteRequest
-                    result = await asyncio.wait_for(
-                        self.client(CheckChatInviteRequest(invite_hash)),
-                        timeout=self._ENTITY_RESOLVE_TIMEOUT,
-                    )
-                    return result  # ChatInvite or ChatInviteAlready
-                except Exception as exc:
-                    logger.debug("CheckChatInviteRequest failed for %s: %s", link, exc)
-                    return None
+            if parsed.type == "invite":
+                invite_hash = parsed.key.removeprefix("invite:")
+                from telethon.tl.functions.messages import CheckChatInviteRequest
+                result = await asyncio.wait_for(
+                    self.client(CheckChatInviteRequest(invite_hash)),
+                    timeout=self._ENTITY_RESOLVE_TIMEOUT,
+                )
+                return result  # ChatInvite or ChatInviteAlready
+
+            username = parsed.key.removeprefix("username:")
             return await asyncio.wait_for(
-                self.client.get_entity(link),
+                self.client.get_entity(username),
                 timeout=self._ENTITY_RESOLVE_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -229,19 +230,41 @@ class TelegramUserService:
             )
             return None
         except Exception as exc:
-            logger.debug("Cannot resolve entity %s: %s", link, exc)
-            return None
+            logger.error(
+                "telegram_entity_resolve_error link=%s type=%s error_type=%s error=%s",
+                parsed.normalized,
+                parsed.type,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            raise
 
-    async def is_group(self, entity: Any) -> bool:
-        """Return True if the entity is a group (not a broadcast channel)."""
+    async def is_allowed_target(self, entity: Any) -> bool:
+        """Return whether an entity is an allowed group/channel target."""
         if isinstance(entity, ChatInviteAlready):
             chat = getattr(entity, "chat", None)
             if chat:
-                return isinstance(chat, (Chat, Channel)) and not getattr(chat, "broadcast", False)
+                return self._is_allowed_chat(chat)
             return False
         if isinstance(entity, ChatInvite):
-            return not getattr(entity, "broadcast", False)
-        return isinstance(entity, (Chat, Channel)) and not getattr(entity, "broadcast", False)
+            return not settings.JOIN_GROUPS_ONLY or not getattr(entity, "broadcast", False)
+        return self._is_allowed_chat(entity)
+
+    @staticmethod
+    def _is_allowed_chat(entity: Any) -> bool:
+        if isinstance(entity, Chat):
+            return True
+        if isinstance(entity, Channel):
+            if getattr(entity, "megagroup", False):
+                return True
+            return not settings.JOIN_GROUPS_ONLY and bool(getattr(entity, "broadcast", False))
+        # Users and bots are never join targets.
+        return False
+
+    async def is_group(self, entity: Any) -> bool:
+        """Backward-compatible alias for callers outside discovery."""
+        return await self.is_allowed_target(entity)
 
     async def get_entity_info(
         self, entity: Any
@@ -278,11 +301,22 @@ class TelegramUserService:
                 from telethon.tl.functions.users import GetFullUserRequest
                 info = await self.client(GetFullUserRequest(full))
                 return getattr(info.full_user, "about", "") or ""
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "telegram_user_bio_error user_id=%d error_type=%s error=%s",
+                user_id,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
         return ""
 
-    async def join_group(self, link: str) -> tuple[bool, int | None, str | None]:
+    async def join_group(
+        self,
+        link: str,
+        *,
+        enforce_throttle: bool = True,
+    ) -> tuple[bool, int | None, str | None]:
         """
         Join a group by invite link or public username.
 
@@ -290,11 +324,15 @@ class TelegramUserService:
         error_message is the exact Telethon exception type + text so callers
         can store it in the DB for later diagnosis.
         """
-        await self._throttle_join()
+        if enforce_throttle:
+            await self._throttle_join()
         try:
-            m = _PRIVATE_INVITE_RE.search(link)
-            if m:
-                invite_hash = m.group(1)
+            parsed = LinkValidator.parse(link)
+            if parsed is None:
+                raise ValueError(f"Unsupported Telegram link: {link}")
+
+            if parsed.type == "invite":
+                invite_hash = parsed.key.removeprefix("invite:")
                 from telethon.tl.functions.messages import ImportChatInviteRequest
                 updates = await self.client(ImportChatInviteRequest(invite_hash))
                 real_id: int | None = None
@@ -304,10 +342,26 @@ class TelegramUserService:
                 return True, real_id, None
             else:
                 from telethon.tl.functions.channels import JoinChannelRequest
-                entity = await self.client.get_entity(link)
+                username = parsed.key.removeprefix("username:")
+                entity = await self.client.get_entity(username)
+                if not isinstance(entity, Channel):
+                    logger.warning(
+                        "join_skipped_not_group link=%s entity_type=%s",
+                        parsed.normalized,
+                        type(entity).__name__,
+                    )
+                    return False, getattr(entity, "id", None), "skipped_not_group"
+                if not await self.is_allowed_target(entity):
+                    logger.info(
+                        "join_skipped_not_group link=%s entity_type=%s megagroup=%s",
+                        parsed.normalized,
+                        type(entity).__name__,
+                        getattr(entity, "megagroup", False),
+                    )
+                    return False, getattr(entity, "id", None), "skipped_not_group"
                 await self.client(JoinChannelRequest(entity))
                 real_id = getattr(entity, "id", None)
-                logger.info("Joined public group: %s (group_id=%s)", link, real_id)
+                logger.info("Joined public target: %s (group_id=%s)", parsed.normalized, real_id)
                 return True, real_id, None
         except UserAlreadyParticipantError:
             logger.info("Already in group: %s", link)
@@ -318,11 +372,11 @@ class TelegramUserService:
             # Status will be set to JOINED in DB so we don't retry endlessly;
             # the account will be admitted once the admin approves.
             logger.info("Join request sent (pending admin approval): %s", link)
-            return True, None, "request_pending_approval"
+            return True, None, "request_sent"
         except FloodWaitError as exc:
             logger.warning(
                 "FloodWait joining %s: Telegram requires waiting %d seconds (~%.1fh). "
-                "Returning immediately — caller will schedule retry.",
+                "Queue must stop before retrying.",
                 link, exc.seconds, exc.seconds / 3600,
             )
             return False, None, f"flood_wait:{exc.seconds}s"
@@ -336,10 +390,24 @@ class TelegramUserService:
                 link,
             )
             return False, None, "peer_flood"
+        except (InviteHashExpiredError, InviteHashInvalidError) as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            logger.error("join_expired link=%s error_type=%s error=%s", link, type(exc).__name__, exc)
+            return False, None, f"expired:{err}"
+        except (UsernameNotOccupiedError, UsernameInvalidError, ChannelPrivateError, ChannelsTooMuchError) as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            logger.error("join_failed_permanent link=%s error_type=%s error=%s", link, type(exc).__name__, exc)
+            return False, None, f"failed:{err}"
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
-            logger.error("Failed to join %s: %s", link, err)
-            return False, None, err
+            logger.error(
+                "join_retryable_error link=%s error_type=%s error=%s",
+                link,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return False, None, f"retryable:{err}"
 
     async def send_message_to_group(self, group_id: int, message: Any) -> bool:
         try:

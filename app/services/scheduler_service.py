@@ -144,7 +144,17 @@ class SchedulerService:
 
                 queued = 0
                 for group in failed_groups:
-                    attempts = await attempt_repo.count_for_group(group.group_id)
+                    attempt_history = await attempt_repo.get_for_group(group.group_id)
+                    if attempt_history and (
+                        (attempt_history[0].error or "").startswith(("expired:", "failed:"))
+                    ):
+                        logger.info(
+                            "Skipping permanent join failure retry for group_id=%d error=%s",
+                            group.group_id,
+                            attempt_history[0].error,
+                        )
+                        continue
+                    attempts = len(attempt_history)
                     if attempts < settings.RETRY_MAX_ATTEMPTS and group.invite_link:
                         jq = JoinQueueService.get_instance()
                         await jq.enqueue(

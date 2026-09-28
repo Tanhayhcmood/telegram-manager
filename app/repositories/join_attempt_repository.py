@@ -81,4 +81,4 @@ class JoinAttemptRepository(BaseRepository[JoinAttempt]):
         attempt = result.scalar_one_or_none()
         if attempt is None:
             return False
-        return attempt.error == "request_pending_approval"
+        return attempt.error in {"request_pending_approval", "request_sent"}

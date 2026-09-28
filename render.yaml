@@ -41,11 +41,19 @@ services:
       - key: BACKUP_DAILY_HOUR
         value: "3"
       - key: MAX_JOINS_PER_DAY
-        value: "30"
+        value: "8"
       - key: JOIN_DELAY_MIN
-        value: "900"
+        value: "2400"
       - key: JOIN_DELAY_MAX
-        value: "1800"
+        value: "5400"
+      - key: FLOOD_WAIT_MARGIN_SECONDS
+        value: "30"
+      - key: JOIN_GROUPS_ONLY
+        value: "true"
+      - key: RETRY_BACKOFF_BASE_SECONDS
+        value: "60"
+      - key: RETRY_BACKOFF_MAX_SECONDS
+        value: "3600"
       - key: PEER_FLOOD_PAUSE_SECONDS
         value: "1800"
       - key: MAX_PEER_FLOOD_PAUSES

@@ -27,6 +27,8 @@ from app.services import (
     ForcedSubscribeService,
     RuntimeConfigService,
 )
+from app.models.discovered_link import DiscoveredLink, LinkType
+from app.utils.validators import LinkValidator
 from app.web_dashboard import DashboardServer
 
 logger = get_logger(__name__)
@@ -124,7 +126,75 @@ async def _init_db() -> None:
         await conn.execute(text(
             "ALTER TABLE groups ADD COLUMN IF NOT EXISTS can_write BOOLEAN NOT NULL DEFAULT TRUE"
         ))
-    logger.info("Additive column migrations ensured (can_write)")
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                CREATE TYPE link_type AS ENUM ('invite', 'username');
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+        """))
+        for value in ("expired", "request_sent", "skipped_not_group"):
+            await conn.execute(text(
+                f"ALTER TYPE link_status ADD VALUE IF NOT EXISTS '{value}'"
+            ))
+        await conn.execute(text(
+            "ALTER TABLE discovered_links "
+            "ADD COLUMN IF NOT EXISTS canonical_key VARCHAR(512)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE discovered_links "
+            "ADD COLUMN IF NOT EXISTS type link_type NOT NULL DEFAULT 'username'"
+        ))
+
+    # Backfill the canonical key/type added after the first production schema.
+    # Duplicate legacy rows are merged by canonical key before the unique index
+    # is created, preserving a JOINED row when one already exists.
+    async with AsyncSessionLocal() as session:
+        from sqlalchemy import select
+        from app.models.discovered_link import LinkStatus
+
+        rows = list((await session.execute(
+            select(DiscoveredLink).order_by(DiscoveredLink.id.asc())
+        )).scalars().all())
+        by_key: dict[str, DiscoveredLink] = {}
+        for row in rows:
+            parsed = LinkValidator.parse(row.link)
+            if parsed is None:
+                canonical_key = f"legacy:{row.id}"
+                normalized = row.link
+                link_type = LinkType.USERNAME
+            else:
+                canonical_key = parsed.key
+                normalized = parsed.normalized
+                link_type = LinkType(parsed.type)
+
+            duplicate = by_key.get(canonical_key)
+            if duplicate is not None:
+                if (
+                    row.status == LinkStatus.JOINED
+                    and duplicate.status != LinkStatus.JOINED
+                ):
+                    duplicate.status = row.status
+                    duplicate.notes = row.notes or duplicate.notes
+                await session.delete(row)
+                continue
+
+            row.link = normalized
+            row.canonical_key = canonical_key
+            row.type = link_type
+            by_key[canonical_key] = row
+        await session.commit()
+
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "ALTER TABLE discovered_links ALTER COLUMN canonical_key SET NOT NULL"
+        ))
+        await conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "uq_discovered_links_canonical_key ON discovered_links (canonical_key)"
+        ))
+    logger.info("Additive column migrations ensured (can_write, discovered link key/type)")
 
 
 async def _build_storage():

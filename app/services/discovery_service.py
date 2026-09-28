@@ -6,7 +6,7 @@ from typing import Any
 from app.database.connection import AsyncSessionLocal
 from app.repositories import GroupRepository, DiscoveredLinkRepository, LogRepository, ContactedUserRepository
 from app.models.group import GroupStatus
-from app.models.discovered_link import LinkStatus
+from app.models.discovered_link import LinkStatus, LinkType
 from app.utils.logger import get_logger
 from app.utils.validators import LinkValidator
 
@@ -26,13 +26,20 @@ class DiscoveryService:
     async def process_message(self, event: Any) -> None:
         try:
             message = event.message
-            text = message.text or ""
+            text_parts = [
+                getattr(message, "text", None) or "",
+                getattr(message, "raw_text", None) or "",
+                getattr(message, "message", None) or "",
+                getattr(message, "caption", None) or "",
+            ]
             sender_id = event.sender_id
 
             if sender_id and sender_id > 0:
                 await self._track_user(event)
 
-            links = LinkValidator.extract_links(text)
+            links: list[str] = []
+            for text in text_parts:
+                links.extend(LinkValidator.extract_links(text))
             # Text-url entities contain links hidden behind labels/buttons and
             # are not necessarily present in message.text.
             try:
@@ -44,7 +51,31 @@ class DiscoveryService:
                     elif isinstance(entity, MessageEntityUrl):
                         links.extend(LinkValidator.extract_links(str(entity_text or "")))
             except Exception as exc:
-                logger.debug("Could not inspect message URL entities: %s", exc)
+                logger.warning(
+                    "link_extraction_error stage=entities error_type=%s error=%s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+
+            # URL buttons are not part of message.text or its entities.
+            try:
+                buttons = getattr(message, "buttons", None) or []
+                for row in buttons:
+                    for button in row:
+                        for attribute in ("url", "query", "data"):
+                            value = getattr(button, attribute, None)
+                            if isinstance(value, bytes):
+                                value = value.decode("utf-8", errors="ignore")
+                            if value:
+                                links.extend(LinkValidator.extract_links(str(value)))
+            except Exception as exc:
+                logger.warning(
+                    "link_extraction_error stage=buttons error_type=%s error=%s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
 
             # A public supergroup's username is itself a joinable Telegram
             # link (for example, t.me/VPSTradingMURAH). Telegram does not
@@ -61,8 +92,13 @@ class DiscoveryService:
                     bio = await self._tg.get_user_bio(sender_id)
                     if bio:
                         links += LinkValidator.extract_links(bio)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "link_extraction_error stage=bio error_type=%s error=%s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
 
             if not links:
                 # Keywords remain useful for future extensions, but they must
@@ -107,7 +143,8 @@ class DiscoveryService:
             from telethon.tl.types import Channel, Chat
 
             if isinstance(chat, Channel):
-                if getattr(chat, "broadcast", False):
+                from app.config import settings
+                if getattr(chat, "broadcast", False) and settings.JOIN_GROUPS_ONLY:
                     return None
             elif not isinstance(chat, Chat):
                 return None
@@ -117,7 +154,12 @@ class DiscoveryService:
                 return None
             return LinkValidator.normalize(f"https://t.me/{username}")
         except Exception as exc:
-            logger.debug("Could not inspect current chat username: %s", exc)
+            logger.warning(
+                "current_chat_link_error error_type=%s error=%s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             return None
 
     async def _track_user(self, event: Any) -> None:
@@ -146,13 +188,39 @@ class DiscoveryService:
         async with AsyncSessionLocal() as session:
             link_repo = DiscoveredLinkRepository(session)
             log_repo = LogRepository(session)
-            record, created = await link_repo.register(link, source)
+            parsed = LinkValidator.parse(link)
+            if parsed is None:
+                logger.warning("link_rejected reason=invalid_link link=%s", link)
+                return
+
+            record, created = await link_repo.register(
+                parsed.normalized,
+                source,
+                canonical_key=parsed.key,
+                link_type=LinkType(parsed.type),
+            )
             if not created:
                 # A transient resolve/database/client failure must not make a
                 # link permanently invisible. Permanent classifications can
                 # safely remain terminal; everything else is eligible for a
                 # fresh validation and queue attempt.
-                if record.status in (LinkStatus.APPROVED, LinkStatus.JOINED):
+                if record.status in (
+                    LinkStatus.APPROVED,
+                    LinkStatus.JOINED,
+                    LinkStatus.REQUEST_SENT,
+                    LinkStatus.EXPIRED,
+                    LinkStatus.SKIPPED_NOT_GROUP,
+                ):
+                    return
+                if record.status == LinkStatus.FAILED and (
+                    (record.notes or "").startswith((
+                        "UsernameInvalidError",
+                        "UsernameNotOccupiedError",
+                        "ChannelPrivateError",
+                        "ChannelsTooMuchError",
+                        "failed:",
+                    ))
+                ):
                     return
                 if record.status == LinkStatus.REJECTED and (
                     (record.notes or "").startswith("Not a group")
@@ -163,30 +231,74 @@ class DiscoveryService:
                 record.notes = None
                 await session.commit()
             else:
-                logger.info("Discovered new link: %s from %s", link, source)
+                logger.info("Discovered new link: %s key=%s from %s", parsed.normalized, parsed.key, source)
                 await log_repo.add(
                     action="link_discovered",
                     result="success",
-                    target=link,
-                    details=f"source={source}",
+                    target=parsed.normalized,
+                    details=f"source={source} key={parsed.key} type={parsed.type}",
                 )
                 await session.commit()
 
-        await self._validate_and_enqueue(link)
+        await self._validate_and_enqueue(parsed.normalized)
 
     async def retry_pending_link(self, link: str) -> None:
         """Revalidate a link that could not be resolved during a transient outage."""
         await self._validate_and_enqueue(link)
 
     async def _validate_and_enqueue(self, link: str) -> None:
-        entity = await self._tg.resolve_entity(link)
+        parsed = LinkValidator.parse(link)
+        if parsed is None:
+            logger.error("link_validation_error error_type=InvalidLink link=%s", link)
+            return
+
+        try:
+            entity = await self._tg.resolve_entity(parsed.normalized)
+        except Exception as exc:
+            from telethon.errors import (
+                ChannelPrivateError,
+                InviteHashExpiredError,
+                InviteHashInvalidError,
+                UsernameInvalidError,
+                UsernameNotOccupiedError,
+            )
+
+            permanent_status = None
+            if isinstance(exc, (InviteHashExpiredError, InviteHashInvalidError)):
+                permanent_status = LinkStatus.EXPIRED
+            elif isinstance(exc, (UsernameInvalidError, UsernameNotOccupiedError, ChannelPrivateError)):
+                permanent_status = LinkStatus.FAILED
+
+            async with AsyncSessionLocal() as session:
+                link_repo = DiscoveredLinkRepository(session)
+                log_repo = LogRepository(session)
+                record = await link_repo.get_by_canonical_key(parsed.key)
+                if record:
+                    record.status = permanent_status or LinkStatus.PENDING
+                    record.notes = f"{type(exc).__name__}: {exc}"
+                    await log_repo.add(
+                        action="link_validation_failed" if permanent_status else "link_validation_retryable",
+                        result="error" if permanent_status else "retryable",
+                        target=parsed.normalized,
+                        details=f"error_type={type(exc).__name__} error={exc}",
+                    )
+                    await session.commit()
+            logger.error(
+                "link_validation_error link=%s type=%s error_type=%s error=%s",
+                parsed.normalized,
+                parsed.type,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return
 
         async with AsyncSessionLocal() as session:
             link_repo = DiscoveredLinkRepository(session)
             group_repo = GroupRepository(session)
             log_repo = LogRepository(session)
 
-            record = await link_repo.get_by_link(link)
+            record = await link_repo.get_by_canonical_key(parsed.key)
             if not record:
                 return
 
@@ -202,13 +314,22 @@ class DiscoveryService:
                 await session.commit()
                 return
 
-            is_group = await self._tg.is_group(entity)
-            if not is_group:
-                record.status = LinkStatus.REJECTED
-                record.notes = "Not a group (channel or other type)"
-                await log_repo.add(action="link_classified_channel", result="skipped", target=link)
+            is_allowed_target = await self._tg.is_allowed_target(entity)
+            if not is_allowed_target:
+                record.status = LinkStatus.SKIPPED_NOT_GROUP
+                record.notes = "Entity is not an allowed Telegram group/channel"
+                await log_repo.add(
+                    action="link_classified_not_group",
+                    result="skipped",
+                    target=parsed.normalized,
+                    details=f"entity_type={type(entity).__name__}",
+                )
                 await session.commit()
-                logger.info("Link %s is a channel — skipping", link)
+                logger.info(
+                    "link_skipped_not_group link=%s entity_type=%s",
+                    parsed.normalized,
+                    type(entity).__name__,
+                )
                 return
 
             # get_entity_info handles ChatInvite / ChatInviteAlready / regular entities
@@ -223,7 +344,7 @@ class DiscoveryService:
             # its numeric ID, while a private invite may first be represented
             # by a stable negative placeholder.
             existing_by_id = await group_repo.get_by_group_id(group_id)
-            existing_by_link = await group_repo.get_by_invite_link(link)
+            existing_by_link = await group_repo.get_by_invite_link(parsed.normalized)
             existing_group = existing_by_id or existing_by_link
 
             if existing_group is not None:
@@ -247,7 +368,7 @@ class DiscoveryService:
 
                 group_id = existing_group.group_id
                 existing_group.status = GroupStatus.PENDING
-                existing_group.invite_link = link
+                existing_group.invite_link = parsed.normalized
                 existing_group.title = title or existing_group.title
                 existing_group.username = username.lower() if username else existing_group.username
                 existing_group.members_count = members_count or existing_group.members_count
@@ -256,7 +377,7 @@ class DiscoveryService:
                 await log_repo.add(
                     action="group_reactivated",
                     result="success",
-                    target=link,
+                    target=parsed.normalized,
                     details=f"group_id={group_id} title={title!r}",
                 )
                 await session.commit()
@@ -266,13 +387,13 @@ class DiscoveryService:
                     group_id=group_id,
                     title=title,
                     username=username.lower() if username else None,
-                    invite_link=link,
+                    invite_link=parsed.normalized,
                     members_count=members_count,
                     status=GroupStatus.PENDING,
                 )
                 record.status = LinkStatus.APPROVED
                 await log_repo.add(
-                    action="group_registered", result="success", target=link,
+                    action="group_registered", result="success", target=parsed.normalized,
                     details=f"group_id={group_id} title={title!r}",
                 )
                 await session.commit()
@@ -280,4 +401,4 @@ class DiscoveryService:
 
         from app.services.join_queue_service import JoinQueueService
         jq = JoinQueueService.get_instance()
-        await jq.enqueue(group_id=group_id, link=link, title=title)
+        await jq.enqueue(group_id=group_id, link=parsed.normalized, title=title)
