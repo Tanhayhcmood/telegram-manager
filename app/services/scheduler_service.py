@@ -203,11 +203,18 @@ class SchedulerService:
                 return
 
             discovery = DiscoveryService(tg)
-            for link in links:
-                try:
-                    await discovery.retry_pending_link(link)
-                except Exception as exc:
-                    logger.warning("Pending link retry failed for %s: %s", link, exc)
+            semaphore = asyncio.Semaphore(4)
+
+            async def retry_one(link: str) -> None:
+                async with semaphore:
+                    try:
+                        await discovery.retry_pending_link(link)
+                    except Exception as exc:
+                        logger.warning("Pending link retry failed for %s: %s", link, exc)
+
+            # Entity lookups are independent; keep them bounded so one
+            # slow Telegram RPC cannot delay every newer discovered link.
+            await asyncio.gather(*(retry_one(link) for link in links))
             logger.info("Pending link retry complete: checked=%d", len(links))
         except Exception as exc:
             logger.warning("Periodic pending-link retry failed: %s", exc)

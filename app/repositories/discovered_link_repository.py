@@ -1,4 +1,4 @@
-from sqlalchemy import select, func
+from sqlalchemy import desc, select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +23,9 @@ class DiscoveredLinkRepository(BaseRepository[DiscoveredLink]):
         result = await self._session.execute(
             select(DiscoveredLink)
             .where(DiscoveredLink.status == LinkStatus.PENDING)
-            .order_by(DiscoveredLink.discovered_at.asc())
+            # New links should not wait behind a backlog of stale records
+            # after a Telegram reconnect or a temporary RPC timeout.
+            .order_by(desc(DiscoveredLink.discovered_at))
             .limit(limit)
         )
         return list(result.scalars().all())

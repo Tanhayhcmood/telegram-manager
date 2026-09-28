@@ -93,6 +93,11 @@ def _record_sent_to_group(group_id: int, message_or_list: Any) -> None:
 class TelegramUserService:
     _instance: "TelegramUserService | None" = None
 
+    # Entity lookup is part of message discovery. A Telegram RPC that hangs
+    # here must not block the discovery handler forever or leave newer links
+    # waiting behind it.
+    _ENTITY_RESOLVE_TIMEOUT = 20.0
+
     # ── Global join throttle ──────────────────────────────────────────────
     # Applies to EVERY join_group() call regardless of caller (main discovery
     # queue OR forced-subscribe auto-join). Without this, forced-subscribe
@@ -204,12 +209,25 @@ class TelegramUserService:
                 invite_hash = m.group(1)
                 try:
                     from telethon.tl.functions.messages import CheckChatInviteRequest
-                    result = await self.client(CheckChatInviteRequest(invite_hash))
+                    result = await asyncio.wait_for(
+                        self.client(CheckChatInviteRequest(invite_hash)),
+                        timeout=self._ENTITY_RESOLVE_TIMEOUT,
+                    )
                     return result  # ChatInvite or ChatInviteAlready
                 except Exception as exc:
                     logger.debug("CheckChatInviteRequest failed for %s: %s", link, exc)
                     return None
-            return await self.client.get_entity(link)
+            return await asyncio.wait_for(
+                self.client.get_entity(link),
+                timeout=self._ENTITY_RESOLVE_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Telegram entity lookup timed out after %.0fs: %s",
+                self._ENTITY_RESOLVE_TIMEOUT,
+                link,
+            )
+            return None
         except Exception as exc:
             logger.debug("Cannot resolve entity %s: %s", link, exc)
             return None
