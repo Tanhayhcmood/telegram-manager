@@ -46,6 +46,16 @@ class DiscoveryService:
             except Exception as exc:
                 logger.debug("Could not inspect message URL entities: %s", exc)
 
+            # A public supergroup's username is itself a joinable Telegram
+            # link (for example, t.me/VPSTradingMURAH). Telegram does not
+            # include that profile link in message.text, so messages from
+            # these groups used to produce no discovery record unless someone
+            # pasted the link explicitly. Add the current chat's username as
+            # a link candidate while keeping broadcast channels excluded.
+            chat_link = await self._get_current_chat_link(event)
+            if chat_link:
+                links.append(chat_link)
+
             if sender_id:
                 try:
                     bio = await self._tg.get_user_bio(sender_id)
@@ -78,6 +88,37 @@ class DiscoveryService:
 
         except Exception as exc:
             logger.error("Error processing message: %s", exc, exc_info=True)
+
+    async def _get_current_chat_link(self, event: Any) -> str | None:
+        """Return the current public group's canonical Telegram link.
+
+        Public group usernames are exposed on the chat entity, not as part of
+        the message body. This is deliberately limited to non-broadcast
+        Telegram chats so the existing channel filtering remains unchanged.
+        """
+        try:
+            chat = None
+            get_chat = getattr(event, "get_chat", None)
+            if get_chat is not None:
+                chat = await get_chat()
+            if chat is None:
+                chat = getattr(event, "chat", None)
+
+            from telethon.tl.types import Channel, Chat
+
+            if isinstance(chat, Channel):
+                if getattr(chat, "broadcast", False):
+                    return None
+            elif not isinstance(chat, Chat):
+                return None
+
+            username = getattr(chat, "username", None)
+            if not username:
+                return None
+            return LinkValidator.normalize(f"https://t.me/{username}")
+        except Exception as exc:
+            logger.debug("Could not inspect current chat username: %s", exc)
+            return None
 
     async def _track_user(self, event: Any) -> None:
         try:
