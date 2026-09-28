@@ -80,9 +80,12 @@ class HealthService:
 
     async def _loop(self) -> None:
         while self._running:
-            await asyncio.sleep(CHECK_INTERVAL)
+            # Verify immediately after startup instead of leaving the
+            # dashboard with the optimistic default state for one full
+            # interval. Later checks continue on the normal cadence.
             await self._check()
             await self._watch_join_worker()
+            await asyncio.sleep(CHECK_INTERVAL)
 
     async def _check(self) -> None:
         if self._tg is None:
