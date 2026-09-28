@@ -1,4 +1,5 @@
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.discovered_link import DiscoveredLink, LinkStatus
@@ -41,6 +42,16 @@ class DiscoveredLinkRepository(BaseRepository[DiscoveredLink]):
             return existing, False
         record = DiscoveredLink(link=link, source=source, status=LinkStatus.PENDING)
         self._session.add(record)
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError:
+            # NewMessage handlers can run concurrently for the same link.
+            # The check-then-insert sequence must not let one duplicate abort
+            # processing of every other link in that message.
+            await self._session.rollback()
+            existing = await self.get_by_link(link)
+            if existing is None:
+                raise
+            return existing, False
         await self._session.refresh(record)
         return record, True

@@ -25,7 +25,8 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _PRIVATE_INVITE_RE = re.compile(
-    r"t\.me/(?:joinchat/|\+)([a-zA-Z0-9_-]+)", re.I
+    r"(?:t\.me|telegram\.me|telegram\.dog)/(?:joinchat/|join/|\+)([a-zA-Z0-9_-]+)",
+    re.I,
 )
 
 # Media types that support a caption field in Telethon send_file
@@ -167,20 +168,11 @@ class TelegramUserService:
             return
         await self.client.connect()
 
-        # Skip group catch-up backlog on reconnect.
-        # Accounts in many groups accumulate missed updates that flood Telethon's
-        # queue and delay private-message events by minutes. Setting pts/date to
-        # the current server state means: only process updates from NOW onwards.
-        try:
-            from telethon.tl.functions.updates import GetStateRequest
-            _cur_state = await self.client(GetStateRequest())
-            self.client.session.set_update_state(0, _cur_state)
-            logger.info(
-                "Telethon update state reset (pts=%d) — group catch-up skipped",
-                _cur_state.pts,
-            )
-        except Exception as _ue:
-            logger.warning("Could not reset Telethon update state: %s", _ue)
+        # Do not reset Telethon's update state here. Resetting pts/date makes
+        # every Render restart silently discard messages received while the
+        # container was sleeping or reconnecting — exactly the links the
+        # discovery queue must not lose. Telethon will catch up from the
+        # persisted session state and the discovery handler is idempotent.
 
         if not await self.client.is_user_authorized():
             logger.warning("Telegram session not authorized — interactive login required")

@@ -20,9 +20,10 @@ from typing import Any
 
 from app.config import settings
 from app.database.connection import AsyncSessionLocal
-from app.repositories import GroupRepository, LogRepository
+from app.repositories import GroupRepository, LogRepository, DiscoveredLinkRepository
 from app.repositories.join_attempt_repository import JoinAttemptRepository
 from app.models.group import GroupStatus
+from app.models.discovered_link import LinkStatus
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -168,7 +169,7 @@ class JoinQueueService:
 
     def _daily_limit_reached(self) -> bool:
         self._reset_daily_counter_if_needed()
-        return False  # محدودیت روزانه غیرفعال است
+        return self._daily_join_count >= settings.MAX_JOINS_PER_DAY
 
     def _seconds_until_midnight_utc(self) -> float:
         """Seconds remaining until the next UTC midnight."""
@@ -475,8 +476,10 @@ class JoinQueueService:
             group_repo = GroupRepository(session)
             log_repo = LogRepository(session)
             attempt_repo = JoinAttemptRepository(session)
+            link_repo = DiscoveredLinkRepository(session)
 
             group = await group_repo.get_by_group_id(task.group_id)
+            discovered_link = await link_repo.get_by_link(task.link)
 
             if success and real_group_id and real_group_id != task.group_id:
                 existing_real = await group_repo.get_by_group_id(real_group_id)
@@ -508,6 +511,8 @@ class JoinQueueService:
                 # Previously this set status=JOINED immediately, which was wrong.
                 if join_error == "request_pending_approval":
                     group.status = GroupStatus.APPROVED  # awaiting Telegram admin approval
+                    if discovered_link:
+                        discovered_link.status = LinkStatus.APPROVED
                     logger.info(
                         "group_id=%d (%r): join request sent — status=APPROVED (awaiting Telegram admin)",
                         task.group_id, task.title,
@@ -516,8 +521,12 @@ class JoinQueueService:
                     from datetime import datetime, timezone as tz
                     group.status = GroupStatus.JOINED
                     group.join_date = datetime.now(tz.utc)
+                    if discovered_link:
+                        discovered_link.status = LinkStatus.JOINED
                 else:
                     group.status = GroupStatus.FAILED
+                    if discovered_link:
+                        discovered_link.status = LinkStatus.FAILED
 
                 if join_error == "request_pending_approval":
                     log_action = "group_join_requested"
@@ -552,6 +561,12 @@ class JoinQueueService:
                     logger.warning(
                         "❌ Failed to join group_id=%d (%r)", task.group_id, task.title
                     )
+            elif discovered_link:
+                discovered_link.status = (
+                    LinkStatus.JOINED if success
+                    else LinkStatus.APPROVED if join_error == "request_pending_approval"
+                    else LinkStatus.FAILED
+                )
 
             await session.commit()
 

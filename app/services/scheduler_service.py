@@ -64,28 +64,42 @@ class SchedulerService:
             misfire_grace_time=3600,
         )
 
-        # Auto-sync live Telethon dialogs into the DB every 3 hours, so groups
+        # Auto-sync live Telethon dialogs into the DB every 10 minutes, so groups
         # the account was kicked/banned from (or newly joined via other means)
         # don't sit stale as JOINED and keep wasting broadcast attempts.
         self._scheduler.add_job(
             self._auto_sync_dialogs,
-            IntervalTrigger(hours=3),
+            IntervalTrigger(minutes=10),
             id="auto_sync_dialogs",
             replace_existing=True,
             misfire_grace_time=600,
+            max_instances=1,
         )
 
-        # Reload missed PENDING/APPROVED groups every 9 minutes.
+        # Reload missed PENDING/APPROVED groups every 5 minutes.
         # The join queue processes one group per ~9 min naturally, but if a group
         # was added to the DB while the queue was draining (e.g. during discovery),
         # or if the bot restarted and missed some groups, this periodic scan
         # picks them up without requiring a manual restart.
         self._scheduler.add_job(
             self._reload_pending_groups,
-            IntervalTrigger(minutes=9),
+            IntervalTrigger(minutes=5),
             id="reload_pending_groups",
             replace_existing=True,
             misfire_grace_time=60,
+            max_instances=1,
+        )
+
+        # Retry links that were discovered while Telegram was reconnecting or
+        # temporarily refused entity resolution. They remain PENDING until
+        # this succeeds, so a transient outage cannot permanently lose a link.
+        self._scheduler.add_job(
+            self._retry_pending_links,
+            IntervalTrigger(minutes=3),
+            id="retry_pending_links",
+            replace_existing=True,
+            misfire_grace_time=60,
+            max_instances=1,
         )
 
         self._scheduler.start()
@@ -167,6 +181,36 @@ class SchedulerService:
             )
         except Exception as exc:
             logger.warning("Periodic pending-reload failed: %s", exc)
+
+    async def _retry_pending_links(self) -> None:
+        """Revalidate unresolved links without requiring a new message event."""
+        try:
+            from app.services.telegram_service import TelegramUserService
+            from app.services.discovery_service import DiscoveryService
+            from app.database.connection import AsyncSessionLocal
+            from app.repositories.discovered_link_repository import DiscoveredLinkRepository
+
+            tg = TelegramUserService.get_instance()
+            if not tg.is_running():
+                return
+
+            async with AsyncSessionLocal() as session:
+                repo = DiscoveredLinkRepository(session)
+                pending = await repo.get_pending(limit=200)
+                links = [row.link for row in pending]
+
+            if not links:
+                return
+
+            discovery = DiscoveryService(tg)
+            for link in links:
+                try:
+                    await discovery.retry_pending_link(link)
+                except Exception as exc:
+                    logger.warning("Pending link retry failed for %s: %s", link, exc)
+            logger.info("Pending link retry complete: checked=%d", len(links))
+        except Exception as exc:
+            logger.warning("Periodic pending-link retry failed: %s", exc)
 
     async def _auto_sync_dialogs(self) -> None:
         """Periodically re-sync live Telethon dialogs into the DB, marking any
