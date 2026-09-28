@@ -21,6 +21,7 @@ from app.repositories.join_attempt_repository import JoinAttemptRepository
 from app.models.group import GroupStatus
 from app.utils.logger import get_logger
 from app.utils.validators import LinkValidator
+from app.services.live_group_state_service import LiveGroupStateService
 
 logger = get_logger(__name__)
 router = Router(name="groups")
@@ -54,6 +55,7 @@ def _list_keyboard(page: int, total: int, prefix: str) -> InlineKeyboardMarkup:
         nav.append(InlineKeyboardButton(text="بعدی ▶️", callback_data=f"{prefix}:{page + 1}"))
     if nav:
         buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="🔄 بروزرسانی لحظه‌ای", callback_data="groups_list")])
     buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -73,6 +75,7 @@ async def cb_groups_page(callback: CallbackQuery) -> None:
 
 async def _show_groups_page(callback: CallbackQuery, page: int) -> None:
     await callback.answer()
+    live_snapshot = await LiveGroupStateService.get_instance().refresh()
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
         total = await repo.count()
@@ -82,7 +85,17 @@ async def _show_groups_page(callback: CallbackQuery, page: int) -> None:
         await callback.message.edit_text("📋 هیچ گروهی ثبت نشده.", reply_markup=_back_btn())  # type: ignore[union-attr]
         return
 
-    lines = [f"📋 <b>گروه‌ها</b> (صفحه {page + 1} از {max(1, -(-total // PAGE_SIZE))}):\n"]
+    live_line = (
+        f"🟢 snapshot زنده Telegram: <code>{live_snapshot.refreshed_at.strftime('%H:%M:%S UTC')}</code> "
+        f"({live_snapshot.live_group_count} گروه)"
+        if live_snapshot.live_group_count is not None
+        else f"⚠️ snapshot زنده در دسترس نیست: <code>{_esc(live_snapshot.error or 'نامشخص')}</code>"
+    )
+    lines = [
+        f"📋 <b>گروه‌ها</b> — کل ثبت‌شده: <code>{total}</code>",
+        live_line,
+        f"صفحه {page + 1} از {max(1, -(-total // PAGE_SIZE))}:\n",
+    ]
     for g in groups:
         emoji = _status_emoji(g.status)
         title = _esc((g.title or "بدون عنوان")[:35])

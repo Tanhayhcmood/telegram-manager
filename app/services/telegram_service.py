@@ -760,7 +760,12 @@ class TelegramUserService:
             logger.error("Failed to send DM to user %d: %s", user_id, exc, exc_info=True)
             return False, str(exc)[:120]
 
-    async def get_all_groups_from_dialogs(self, limit: int = 3000) -> list[dict]:
+    async def get_all_groups_from_dialogs(
+        self,
+        limit: int = 3000,
+        *,
+        strict: bool = False,
+    ) -> list[dict]:
         """Return all groups/supergroups the account is in, from live Telethon dialogs.
 
         Ground truth for broadcast — every group the account is currently a member of,
@@ -774,9 +779,13 @@ class TelegramUserService:
             )
         except asyncio.TimeoutError:
             logger.warning("get_all_groups_from_dialogs timed out after 60s")
+            if strict:
+                raise
             dialogs = []
         except Exception as exc:
             logger.warning("get_all_groups_from_dialogs failed: %s", exc)
+            if strict:
+                raise
             dialogs = []
 
         groups: list[dict] = []
@@ -799,7 +808,7 @@ class TelegramUserService:
         logger.info("get_all_groups_from_dialogs: %d groups found", len(groups))
         return groups
 
-    async def sync_dialogs_to_db(self) -> tuple[int, int]:
+    async def sync_dialogs_to_db(self, *, strict: bool = False) -> tuple[int, int]:
         """Sync all live Telethon group dialogs into the DB as JOINED groups.
 
         Returns (new_count, total_count).
@@ -809,20 +818,28 @@ class TelegramUserService:
         from app.repositories import GroupRepository
         from app.models.group import GroupStatus
 
-        all_groups = await self.get_all_groups_from_dialogs()
+        all_groups = await self.get_all_groups_from_dialogs(strict=strict)
         new_count = 0
         active_ids: set[int] = {g["group_id"] for g in all_groups}
 
         async with AsyncSessionLocal() as session:
             repo = GroupRepository(session)
             for g in all_groups:
+                existing = await repo.get_by_group_id(g["group_id"])
                 _, created = await repo.upsert(
                     group_id=g["group_id"],
                     title=g["title"],
                     username=g.get("username"),
                     members_count=g.get("members_count"),
                     status=GroupStatus.JOINED,
-                    join_date=datetime.now(timezone.utc),
+                    # A periodic live refresh must not rewrite the original
+                    # join time; otherwise "recent groups" changes every
+                    # time the stats/list view is opened.
+                    join_date=(
+                        existing.join_date
+                        if existing and existing.join_date
+                        else datetime.now(timezone.utc)
+                    ),
                 )
                 if created:
                     new_count += 1

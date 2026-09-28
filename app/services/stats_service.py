@@ -7,6 +7,7 @@ from app.repositories.join_attempt_repository import JoinAttemptRepository
 from app.models.group import GroupStatus
 from app.models.discovered_link import LinkStatus
 from app.utils.logger import get_logger
+from app.services.live_group_state_service import LiveGroupStateService
 
 logger = get_logger(__name__)
 
@@ -30,10 +31,15 @@ class SystemStats:
     last_activity: datetime | None
     last_group_title: str | None
     generated_at: datetime
+    live_refreshed_at: datetime
+    live_group_count: int | None
+    live_refresh_error: str | None
 
 
 class StatsService:
     async def get_stats(self) -> SystemStats:
+        live_snapshot = await LiveGroupStateService.get_instance().refresh()
+
         async with AsyncSessionLocal() as session:
             group_repo = GroupRepository(session)
             link_repo = DiscoveredLinkRepository(session)
@@ -87,4 +93,7 @@ class StatsService:
             last_activity=last_activity,
             last_group_title=last_group_title,
             generated_at=datetime.now(timezone.utc),
+            live_refreshed_at=live_snapshot.refreshed_at,
+            live_group_count=live_snapshot.live_group_count,
+            live_refresh_error=live_snapshot.error,
         )

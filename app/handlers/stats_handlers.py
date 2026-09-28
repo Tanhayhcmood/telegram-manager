@@ -26,6 +26,13 @@ async def cb_stats(callback: CallbackQuery) -> None:
     now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     last_act = s.last_activity.strftime("%Y-%m-%d %H:%M UTC") if s.last_activity else "—"
     health_icon = "✅" if s.client_healthy else "⚠️"
+    live_refresh = s.live_refreshed_at.strftime("%H:%M:%S UTC")
+    live_line = (
+        f"🟢 snapshot زنده Telegram: <code>{live_refresh}</code> "
+        f"({s.live_group_count} گروه)"
+        if s.live_group_count is not None
+        else f"⚠️ snapshot زنده در دسترس نیست: <code>{s.live_refresh_error or 'نامشخص'}</code>"
+    )
 
     queue_in_memory = s.join_queue_size
     queue_in_db = s.pending_queue_size
@@ -33,8 +40,10 @@ async def cb_stats(callback: CallbackQuery) -> None:
     text = (
         "📊 <b>آمار لحظه‌ای سیستم</b>\n"
         f"⏱ بروزرسانی: <code>{now_str}</code>\n\n"
+        f"{live_line}\n\n"
         "👥 <b>گروه‌ها</b>\n"
-        f"  کل: <code>{s.total_groups}</code>\n"
+        f"  کل ثبت‌شده: <code>{s.total_groups}</code>\n"
+        f"  عضو فعلی در Telegram: <code>{s.live_group_count if s.live_group_count is not None else '—'}</code>\n"
         f"  🟢 عضو شده: <code>{s.joined_groups}</code>\n"
         f"  ✅ امروز: <code>{s.today_joins}</code> گروه\n"
         f"  ⏳ در صف (دیتابیس): <code>{queue_in_db}</code> | (حافظه): <code>{queue_in_memory}</code>\n"
