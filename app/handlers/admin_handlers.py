@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from aiogram.filters import CommandStart, Command
 
 from app.utils.logger import get_logger
@@ -40,7 +40,12 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     # AdminAuthMiddleware already blocks non-admins before this handler runs.
-    await message.answer(
+    menu_message = await message.answer(
+        "🤖 <b>ربات مدیریت گروه‌های تلگرام</b>\n\nانتخاب کنید:",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await menu_message.edit_text(
         "🤖 <b>ربات مدیریت گروه‌های تلگرام</b>\n\nانتخاب کنید:",
         parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
@@ -50,7 +55,8 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("menu"))
 async def cmd_menu(message: Message) -> None:
     # AdminAuthMiddleware already blocks non-admins before this handler runs.
-    await message.answer("منوی اصلی:", reply_markup=main_menu_keyboard())
+    menu_message = await message.answer("منوی اصلی:", reply_markup=ReplyKeyboardRemove())
+    await menu_message.edit_text("منوی اصلی:", reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data == "main_menu")
