@@ -257,6 +257,7 @@ class DiscoveryService:
         except Exception as exc:
             from telethon.errors import (
                 ChannelPrivateError,
+                FloodWaitError,
                 InviteHashExpiredError,
                 InviteHashInvalidError,
                 UsernameInvalidError,
@@ -268,6 +269,79 @@ class DiscoveryService:
                 permanent_status = LinkStatus.EXPIRED
             elif isinstance(exc, (UsernameInvalidError, UsernameNotOccupiedError, ChannelPrivateError)):
                 permanent_status = LinkStatus.FAILED
+
+            # Resolving a public username can itself trigger Telegram's
+            # account-level FloodWait. Do not discard the link before it
+            # reaches the join queue: persist a placeholder group and enqueue
+            # it as PENDING. JoinQueueService will then apply the exact
+            # FloodWait pause/requeue policy instead of repeatedly resolving
+            # the same username from the scheduler.
+            if isinstance(exc, FloodWaitError):
+                wait_seconds = int(getattr(exc, "seconds", 0) or 0)
+                async with AsyncSessionLocal() as session:
+                    link_repo = DiscoveredLinkRepository(session)
+                    group_repo = GroupRepository(session)
+                    log_repo = LogRepository(session)
+                    record = await link_repo.get_by_canonical_key(parsed.key)
+                    if record:
+                        record.status = LinkStatus.PENDING
+                        record.notes = (
+                            f"FloodWaitError: deferred for {wait_seconds}s "
+                            f"before entity resolution"
+                        )
+
+                        existing_group = await group_repo.get_by_invite_link(
+                            parsed.normalized
+                        )
+                        if existing_group is None:
+                            placeholder_id = _placeholder_group_id(parsed.normalized)
+                            await group_repo.upsert(
+                                group_id=placeholder_id,
+                                title=parsed.normalized,
+                                username=(
+                                    parsed.key.removeprefix("username:")
+                                    if parsed.type == "username"
+                                    else None
+                                ),
+                                invite_link=parsed.normalized,
+                                members_count=None,
+                                status=GroupStatus.PENDING,
+                            )
+                        else:
+                            placeholder_id = existing_group.group_id
+                            existing_group.status = GroupStatus.PENDING
+
+                        await log_repo.add(
+                            action="link_validation_deferred_flood_wait",
+                            result="queued",
+                            target=parsed.normalized,
+                            details=(
+                                f"error_type=FloodWaitError seconds={wait_seconds} "
+                                f"group_id={placeholder_id}"
+                            ),
+                        )
+                        await session.commit()
+                    else:
+                        logger.error(
+                            "FloodWait link record missing before queueing: %s",
+                            parsed.normalized,
+                        )
+                        return
+
+                from app.services.join_queue_service import JoinQueueService
+                await JoinQueueService.get_instance().enqueue(
+                    group_id=placeholder_id,
+                    link=parsed.normalized,
+                    title=parsed.normalized,
+                )
+                logger.warning(
+                    "Deferred link to join queue after entity-resolution FloodWait: "
+                    "link=%s wait_seconds=%d group_id=%d",
+                    parsed.normalized,
+                    wait_seconds,
+                    placeholder_id,
+                )
+                return
 
             async with AsyncSessionLocal() as session:
                 link_repo = DiscoveredLinkRepository(session)
