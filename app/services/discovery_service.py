@@ -143,8 +143,7 @@ class DiscoveryService:
             from telethon.tl.types import Channel, Chat
 
             if isinstance(chat, Channel):
-                from app.config import settings
-                if getattr(chat, "broadcast", False) and settings.JOIN_GROUPS_ONLY:
+                if not getattr(chat, "megagroup", False):
                     return None
             elif not isinstance(chat, Chat):
                 return None
@@ -270,76 +269,37 @@ class DiscoveryService:
             elif isinstance(exc, (UsernameInvalidError, UsernameNotOccupiedError, ChannelPrivateError)):
                 permanent_status = LinkStatus.FAILED
 
-            # Resolving a public username can itself trigger Telegram's
-            # account-level FloodWait. Do not discard the link before it
-            # reaches the join queue: persist a placeholder group and enqueue
-            # it as PENDING. JoinQueueService will then apply the exact
-            # FloodWait pause/requeue policy instead of repeatedly resolving
-            # the same username from the scheduler.
+            # A FloodWait means Telegram did not let us resolve the target.
+            # Strict policy: do not create a placeholder group or enqueue an
+            # unresolved link. The pending link can be revalidated later, but
+            # only a verified group/supergroup may enter the join queue.
             if isinstance(exc, FloodWaitError):
                 wait_seconds = int(getattr(exc, "seconds", 0) or 0)
                 async with AsyncSessionLocal() as session:
                     link_repo = DiscoveredLinkRepository(session)
-                    group_repo = GroupRepository(session)
                     log_repo = LogRepository(session)
                     record = await link_repo.get_by_canonical_key(parsed.key)
                     if record:
                         record.status = LinkStatus.PENDING
                         record.notes = (
                             f"FloodWaitError: deferred for {wait_seconds}s "
-                            f"before entity resolution"
+                            "before strict group validation"
                         )
-
-                        existing_group = await group_repo.get_by_invite_link(
-                            parsed.normalized
-                        )
-                        if existing_group is None:
-                            placeholder_id = _placeholder_group_id(parsed.normalized)
-                            await group_repo.upsert(
-                                group_id=placeholder_id,
-                                title=parsed.normalized,
-                                username=(
-                                    parsed.key.removeprefix("username:")
-                                    if parsed.type == "username"
-                                    else None
-                                ),
-                                invite_link=parsed.normalized,
-                                members_count=None,
-                                status=GroupStatus.PENDING,
-                            )
-                        else:
-                            placeholder_id = existing_group.group_id
-                            existing_group.status = GroupStatus.PENDING
-
                         await log_repo.add(
                             action="link_validation_deferred_flood_wait",
-                            result="queued",
+                            result="retryable",
                             target=parsed.normalized,
                             details=(
-                                f"error_type=FloodWaitError seconds={wait_seconds} "
-                                f"group_id={placeholder_id}"
+                                f"error_type=FloodWaitError seconds={wait_seconds}; "
+                                "not queued until group type is verified"
                             ),
                         )
                         await session.commit()
-                    else:
-                        logger.error(
-                            "FloodWait link record missing before queueing: %s",
-                            parsed.normalized,
-                        )
-                        return
-
-                from app.services.join_queue_service import JoinQueueService
-                await JoinQueueService.get_instance().enqueue(
-                    group_id=placeholder_id,
-                    link=parsed.normalized,
-                    title=parsed.normalized,
-                )
                 logger.warning(
-                    "Deferred link to join queue after entity-resolution FloodWait: "
-                    "link=%s wait_seconds=%d group_id=%d",
+                    "Deferred link validation after FloodWait without queueing: "
+                    "link=%s wait_seconds=%d",
                     parsed.normalized,
                     wait_seconds,
-                    placeholder_id,
                 )
                 return
 
@@ -391,7 +351,7 @@ class DiscoveryService:
             is_allowed_target = await self._tg.is_allowed_target(entity)
             if not is_allowed_target:
                 record.status = LinkStatus.SKIPPED_NOT_GROUP
-                record.notes = "Entity is not an allowed Telegram group/channel"
+                record.notes = "Entity is not a Telegram group or supergroup"
                 await log_repo.add(
                     action="link_classified_not_group",
                     result="skipped",
