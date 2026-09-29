@@ -29,6 +29,15 @@ from app.utils.validators import LinkValidator
 
 logger = get_logger(__name__)
 
+
+class EntityResolutionPausedError(RuntimeError):
+    """Raised locally while Telegram has an active entity lookup cooldown."""
+
+    def __init__(self, seconds: int) -> None:
+        self.seconds = max(1, seconds)
+        super().__init__(f"Telegram entity resolution paused for {self.seconds}s")
+
+
 # Media types that support a caption field in Telethon send_file
 _CAPTIONABLE = {"photo", "video", "document", "audio", "animation"}
 
@@ -230,6 +239,9 @@ class TelegramUserService:
         parsed = LinkValidator.parse(link)
         if parsed is None:
             raise ValueError(f"Unsupported Telegram link: {link}")
+        remaining = self.entity_resolve_cooldown_remaining()
+        if remaining:
+            raise EntityResolutionPausedError(remaining)
 
         try:
             if parsed.type == "invite":

@@ -323,6 +323,14 @@ class JoinQueueService:
             loaded = 0
             skipped_no_link = 0
             for group in to_reload:
+                if self._tg is not None:
+                    cooldown_remaining = self._tg.entity_resolve_cooldown_remaining()
+                    if cooldown_remaining:
+                        logger.info(
+                            "Stopping join-queue reload during Telegram FloodWait (%ds remaining)",
+                            cooldown_remaining,
+                        )
+                        break
                 if not group.invite_link:
                     skipped_no_link += 1
                     logger.debug(
