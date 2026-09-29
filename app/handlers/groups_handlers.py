@@ -33,11 +33,13 @@ PENDING_GROUP_CACHE_TTL = 15 * 60
 # Older deployments could create a pending row before the Telegram entity was
 # checked. Cache the live classification so opening the review screen does not
 # resolve the same links on every click.
-_pending_group_cache: dict[tuple[int, str | None], tuple[float, bool]] = {}
+_pending_group_cache: dict[
+    tuple[int, str | None], tuple[float, bool, str | None]
+] = {}
 
 
-async def _is_actual_group(group) -> bool:
-    """Return False for pending rows that resolve to users, bots, or channels.
+async def _classify_pending_group(group) -> tuple[bool, str | None]:
+    """Classify a pending row and return its live Telegram title.
 
     A failed lookup is treated as unknown rather than non-group. This keeps a
     valid private invite visible during a temporary Telegram/API outage.
@@ -46,36 +48,38 @@ async def _is_actual_group(group) -> bool:
     now = time.monotonic()
     cached = _pending_group_cache.get(cache_key)
     if cached and now - cached[0] < PENDING_GROUP_CACHE_TTL:
-        return cached[1]
+        return cached[1], cached[2]
 
     from app.services.telegram_service import TelegramUserService
 
     tg = TelegramUserService.get_instance()
     if not tg.is_running():
-        return True
+        return True, group.title
 
     entity = await tg.resolve_entity(group.invite_link or group.group_id)
     if entity is None:
-        return True
+        return True, group.title
 
     is_group = await tg.is_group(entity)
-    _pending_group_cache[cache_key] = (now, is_group)
+    live_title = getattr(entity, "title", None) or group.title
+    _pending_group_cache[cache_key] = (now, is_group, live_title)
     if not is_group:
         logger.info(
             "Hiding non-group pending row %d (%r) from review panel",
             group.group_id,
             group.title,
         )
-    return is_group
+    return is_group, live_title
 
 
 async def _only_actual_groups(groups: list) -> list:
-    """Keep only rows confirmed by Telegram to be groups/supergroups."""
+    """Keep actual groups and carry their live titles into the review panel."""
     actual_groups = []
     for group in groups:
         try:
-            if await _is_actual_group(group):
-                actual_groups.append(group)
+            is_group, live_title = await _classify_pending_group(group)
+            if is_group:
+                actual_groups.append((group, live_title))
         except Exception as exc:
             # Do not hide a real group because one entity lookup failed.
             logger.warning(
@@ -83,7 +87,7 @@ async def _only_actual_groups(groups: list) -> list:
                 group.group_id,
                 exc,
             )
-            actual_groups.append(group)
+            actual_groups.append((group, group.title))
     return actual_groups
 
 
@@ -192,8 +196,8 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
     lines = [f"⏳ <b>در انتظار بررسی</b> ({total} گروه — صفحه {page + 1} از {total_pages}):\n"]
     action_btns: list[list[InlineKeyboardButton]] = []
 
-    for g in groups:
-        raw_title = (g.title or str(g.group_id))[:25]
+    for g, live_title in groups:
+        raw_title = (live_title or g.title or str(g.group_id))[:25]
         title = _esc(raw_title)
         lines.append(f"• <code>{g.group_id}</code> — {title}")
         action_btns.append([
