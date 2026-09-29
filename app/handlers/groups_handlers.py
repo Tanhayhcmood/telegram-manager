@@ -61,7 +61,10 @@ async def _classify_pending_group(group) -> tuple[bool, str | None]:
         return True, group.title
 
     is_group = await tg.is_group(entity)
-    live_title = getattr(entity, "title", None) or group.title
+    # ChatInviteAlready stores the actual Chat/Channel under ``entity.chat``;
+    # reading entity.title directly misses that name and falls back to the URL.
+    _, live_title, _, _ = await tg.get_entity_info(entity)
+    live_title = live_title or group.title
     _pending_group_cache[cache_key] = (now, is_group, live_title)
     if not is_group:
         logger.info(
