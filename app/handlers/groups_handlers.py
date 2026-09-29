@@ -20,6 +20,10 @@ from app.database.connection import AsyncSessionLocal
 from app.repositories import GroupRepository
 from app.repositories.join_attempt_repository import JoinAttemptRepository
 from app.models.group import GroupStatus
+from app.services.group_title_service import (
+    fallback_group_title,
+    resolve_group_titles,
+)
 from app.utils.logger import get_logger
 from app.utils.validators import LinkValidator
 
@@ -54,17 +58,17 @@ async def _classify_pending_group(group) -> tuple[bool, str | None]:
 
     tg = TelegramUserService.get_instance()
     if not tg.is_running():
-        return True, group.title
+        return True, fallback_group_title(group)
 
     entity = await tg.resolve_entity(group.invite_link or group.group_id)
     if entity is None:
-        return True, group.title
+        return True, fallback_group_title(group)
 
     is_group = await tg.is_group(entity)
     # ChatInviteAlready stores the actual Chat/Channel under ``entity.chat``;
     # reading entity.title directly misses that name and falls back to the URL.
     _, live_title, _, _ = await tg.get_entity_info(entity)
-    live_title = live_title or group.title
+    live_title = live_title or fallback_group_title(group)
     _pending_group_cache[cache_key] = (now, is_group, live_title)
     if not is_group:
         logger.info(
@@ -90,7 +94,7 @@ async def _only_actual_groups(groups: list) -> list:
                 group.group_id,
                 exc,
             )
-            actual_groups.append((group, group.title))
+            actual_groups.append((group, fallback_group_title(group)))
     return actual_groups
 
 
@@ -143,6 +147,8 @@ async def _show_groups_page(callback: CallbackQuery, page: int) -> None:
         repo = GroupRepository(session)
         total = await repo.count()
         groups = await repo.get_latest(limit=PAGE_SIZE, offset=page * PAGE_SIZE)
+        titles = await resolve_group_titles(groups, max_length=35)
+        await session.commit()
 
     if not groups:
         await callback.message.edit_text("📋 هیچ گروهی ثبت نشده.", reply_markup=_back_btn())  # type: ignore[union-attr]
@@ -151,7 +157,7 @@ async def _show_groups_page(callback: CallbackQuery, page: int) -> None:
     lines = [f"📋 <b>گروه‌ها</b> (صفحه {page + 1} از {max(1, -(-total // PAGE_SIZE))}):\n"]
     for g in groups:
         emoji = _status_emoji(g.status)
-        title = _esc((g.title or "بدون عنوان")[:35])
+        title = _esc(titles.get(g.group_id, fallback_group_title(g)))
         lines.append(f"{emoji} <code>{g.group_id}</code> — {title}")
 
     await callback.message.edit_text(  # type: ignore[union-attr]
@@ -324,6 +330,8 @@ async def _show_failed_page(callback: CallbackQuery, page: int) -> None:
         groups = await repo.get_by_status_paged(
             GroupStatus.FAILED, limit=PAGE_SIZE, offset=page * PAGE_SIZE
         )
+        titles = await resolve_group_titles(groups, max_length=25)
+        await session.commit()
 
     if not groups:
         await callback.message.edit_text("✅ هیچ گروه ناموفقی وجود ندارد.", reply_markup=_back_btn())  # type: ignore[union-attr]
@@ -334,7 +342,7 @@ async def _show_failed_page(callback: CallbackQuery, page: int) -> None:
     btns: list[list[InlineKeyboardButton]] = []
 
     for g in groups:
-        raw_title = (g.title or str(g.group_id))[:25]
+        raw_title = titles.get(g.group_id, fallback_group_title(g))
         title = _esc(raw_title)
         lines.append(f"• <code>{g.group_id}</code> — {title}")
         btns.append([

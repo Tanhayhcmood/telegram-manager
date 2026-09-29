@@ -10,6 +10,7 @@ from app.database.connection import AsyncSessionLocal
 from app.repositories import GroupRepository
 from app.models.group import GroupStatus
 from app.services.broadcast_queue_service import BroadcastQueueService
+from app.services.group_title_service import resolve_group_titles
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -131,6 +132,8 @@ async def cb_confirm_content(callback: CallbackQuery, state: FSMContext) -> None
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
         groups = await repo.get_joined()
+        titles = await resolve_group_titles(groups, max_length=30)
+        await session.commit()
 
     if not groups:
         await state.clear()
@@ -142,7 +145,7 @@ async def cb_confirm_content(callback: CallbackQuery, state: FSMContext) -> None
 
     buttons: list[list[InlineKeyboardButton]] = []
     for g in groups[:20]:
-        title = (g.title or str(g.group_id))[:30]
+        title = titles.get(g.group_id, str(g.group_id))
         buttons.append([
             InlineKeyboardButton(text=f"📤 {title}", callback_data=f"send_to:{g.group_id}")
         ])
