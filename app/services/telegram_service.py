@@ -241,14 +241,19 @@ class TelegramUserService:
             raise
 
     async def is_allowed_target(self, entity: Any) -> bool:
-        """Return whether an entity is an allowed group/channel target."""
+        """Return True only for Telegram groups and supergroups.
+
+        This is intentionally stricter than a generic "not a channel" check:
+        broadcast channels, private chats, users, bots, and unresolved invite
+        previews are never valid discovery or join targets.
+        """
         if isinstance(entity, ChatInviteAlready):
-            chat = getattr(entity, "chat", None)
-            if chat:
-                return self._is_allowed_chat(chat)
-            return False
+            return self._is_allowed_chat(getattr(entity, "chat", None))
         if isinstance(entity, ChatInvite):
-            return not settings.JOIN_GROUPS_ONLY or not getattr(entity, "broadcast", False)
+            # ChatInvite exposes `broadcast` for channels and `megagroup` for
+            # supergroups. Basic groups have broadcast=False too, so both
+            # group kinds are accepted while broadcast channels are rejected.
+            return getattr(entity, "broadcast", None) is False
         return self._is_allowed_chat(entity)
 
     @staticmethod
@@ -256,9 +261,9 @@ class TelegramUserService:
         if isinstance(entity, Chat):
             return True
         if isinstance(entity, Channel):
-            if getattr(entity, "megagroup", False):
-                return True
-            return not settings.JOIN_GROUPS_ONLY and bool(getattr(entity, "broadcast", False))
+            # Telegram represents supergroups as Channel(megagroup=True).
+            # A broadcast channel is always megagroup=False and is rejected.
+            return bool(getattr(entity, "megagroup", False))
         # Users and bots are never join targets.
         return False
 
@@ -332,6 +337,18 @@ class TelegramUserService:
                 raise ValueError(f"Unsupported Telegram link: {link}")
 
             if parsed.type == "invite":
+                # Validate the invite preview before ImportChatInviteRequest.
+                # Without this guard, a channel invite could be joined before
+                # the later database classification had a chance to reject it.
+                invite_entity = await self.resolve_entity(parsed.normalized)
+                if invite_entity is None or not await self.is_allowed_target(invite_entity):
+                    logger.info(
+                        "join_skipped_not_group link=%s invite_type=%s",
+                        parsed.normalized,
+                        type(invite_entity).__name__ if invite_entity is not None else "unresolved",
+                    )
+                    return False, getattr(invite_entity, "id", None), "skipped_not_group"
+
                 invite_hash = parsed.key.removeprefix("invite:")
                 from telethon.tl.functions.messages import ImportChatInviteRequest
                 updates = await self.client(ImportChatInviteRequest(invite_hash))
@@ -884,7 +901,7 @@ class TelegramUserService:
                     "username": None,
                     "members_count": getattr(entity, "participants_count", None),
                 })
-            elif isinstance(entity, Channel) and not getattr(entity, "broadcast", False):
+            elif isinstance(entity, Channel) and getattr(entity, "megagroup", False):
                 groups.append({
                     "group_id": d.id,
                     "title": entity.title,
