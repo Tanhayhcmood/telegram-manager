@@ -5,7 +5,6 @@ Jobs:
   - Auto-retry failed group joins
   - Daily stats report to admins
 """
-import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -203,6 +202,13 @@ class SchedulerService:
             tg = TelegramUserService.get_instance()
             if not tg.is_running():
                 return
+            cooldown_remaining = tg.entity_resolve_cooldown_remaining()
+            if cooldown_remaining:
+                logger.info(
+                    "Skipping pending-link retry during Telegram FloodWait (%ds remaining)",
+                    cooldown_remaining,
+                )
+                return
 
             async with AsyncSessionLocal() as session:
                 repo = DiscoveredLinkRepository(session)
@@ -213,19 +219,23 @@ class SchedulerService:
                 return
 
             discovery = DiscoveryService(tg)
-            semaphore = asyncio.Semaphore(4)
-
-            async def retry_one(link: str) -> None:
-                async with semaphore:
-                    try:
-                        await discovery.retry_pending_link(link)
-                    except Exception as exc:
-                        logger.warning("Pending link retry failed for %s: %s", link, exc)
-
-            # Entity lookups are independent; keep them bounded so one
-            # slow Telegram RPC cannot delay every newer discovered link.
-            await asyncio.gather(*(retry_one(link) for link in links))
-            logger.info("Pending link retry complete: checked=%d", len(links))
+            # Resolve one link at a time. Four concurrent ResolveUsername RPCs
+            # can trigger a long Telegram FloodWait and block the review UI.
+            checked = 0
+            for link in links[:25]:
+                if tg.entity_resolve_cooldown_remaining():
+                    break
+                try:
+                    await discovery.retry_pending_link(link)
+                except Exception as exc:
+                    logger.warning("Pending link retry failed for %s: %s", link, exc)
+                checked += 1
+            logger.info(
+                "Pending link retry complete: checked=%d available=%d total_pending=%d",
+                checked,
+                len(links[:25]),
+                len(links),
+            )
         except Exception as exc:
             logger.warning("Periodic pending-link retry failed: %s", exc)
 

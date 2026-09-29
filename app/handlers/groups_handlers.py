@@ -137,13 +137,24 @@ async def _validate_pending_target(link: str | None) -> bool | None:
     tg = TelegramUserService.get_instance()
     if not tg.is_running():
         return None
+    remaining = tg.entity_resolve_cooldown_remaining()
+    if remaining:
+        logger.info(
+            "Pending target validation deferred during Telegram FloodWait (%ds remaining)",
+            remaining,
+        )
+        return None
     try:
         entity = await asyncio.wait_for(tg.resolve_entity(link), timeout=6)
         if entity is None:
             return False
         return await tg.is_allowed_target(entity)
     except Exception as exc:
-        logger.warning("Pending target validation failed for %s: %s", link, exc)
+        logger.warning(
+            "Pending target validation unavailable for %s: %s",
+            link,
+            type(exc).__name__,
+        )
         return None
 
 
@@ -273,41 +284,14 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
         )
         return
 
-    # Legacy rows are revalidated before they are shown. This keeps the review
-    # surface strict even when the database predates the group-only policy.
-    checks = await asyncio.gather(*[
-        _validate_pending_target(invite_link)
-        for _, _, invite_link, _ in rows
-    ])
-    verified_rows = []
-    rejected_ids = []
-    unresolved_count = 0
-    for row, allowed in zip(rows, checks):
-        if allowed is True:
-            verified_rows.append(row)
-        elif allowed is False:
-            rejected_ids.append(row[0])
-        else:
-            unresolved_count += 1
-    if rejected_ids:
-        await asyncio.gather(*[_reject_pending_non_group(group_id) for group_id in rejected_ids])
-    rows = verified_rows
-
     if not rows:
-        suffix = (
-            f"\n\n⏳ {unresolved_count} مورد فعلاً قابل راستی‌آزمایی نیست و پنهان مانده است."
-            if unresolved_count else ""
-        )
         await callback.message.edit_text(  # type: ignore[union-attr]
             "🛡 <b>مورد قابل تأیید در این صفحه وجود ندارد.</b>\n\n"
-            "فقط گروه و سوپرگروه در این بخش نمایش داده می‌شوند." + suffix,
+            "فقط گروه و سوپرگروه در این بخش نمایش داده می‌شوند.",
             parse_mode="HTML",
             reply_markup=_back_btn(),
         )
         return
-
-    # Resolve URL-shaped titles in the background so the list opens instantly.
-    asyncio.create_task(_store_resolved_pending_titles(rows))
 
     total_pages = max(1, -(-total // PAGE_SIZE))
     page = min(max(page, 0), total_pages - 1)
@@ -316,6 +300,7 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
         "━━━━━━━━━━━━━━━━━━",
         f"📦 صف فعلی: <b>{total}</b> مورد  •  📄 صفحه <b>{page + 1}</b> از <b>{total_pages}</b>",
         "🛡 فقط <b>گروه</b> و <b>سوپرگروه</b> قابل تأیید و عضویت هستند.",
+        "ℹ️ نوع هدف هنگام تأیید نهایی دوباره بررسی می‌شود.",
         "━━━━━━━━━━━━━━━━━━",
     ]
     action_btns: list[list[InlineKeyboardButton]] = []
@@ -392,9 +377,15 @@ async def cb_approve(callback: CallbackQuery) -> None:
 
     allowed = await _validate_pending_target(invite_link)
     if allowed is None:
+        remaining = TelegramUserService.get_instance().entity_resolve_cooldown_remaining()
+        wait_hint = (
+            f"تلگرام حدود {max(1, remaining // 60)} دقیقه دیگر دوباره اجازهٔ بررسی می‌دهد."
+            if remaining else
+            "اتصال User Client یا اطلاعات لینک موقتاً در دسترس نیست."
+        )
         await callback.message.answer(  # type: ignore[union-attr]
             "⚠️ <b>راستی‌آزمایی انجام نشد</b>\n\n"
-            "اتصال تلگرام یا اطلاعات لینک موقتاً در دسترس نیست. برای امنیت، "
+            f"{wait_hint} برای امنیت، "
             "این مورد فعلاً تأیید نشد؛ چند لحظه بعد دوباره تلاش کنید.",
             parse_mode="HTML",
         )

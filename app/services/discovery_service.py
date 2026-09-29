@@ -251,6 +251,15 @@ class DiscoveryService:
             logger.error("link_validation_error error_type=InvalidLink link=%s", link)
             return
 
+        cooldown_remaining = self._tg.entity_resolve_cooldown_remaining()
+        if cooldown_remaining:
+            logger.debug(
+                "Skipping link validation during Telegram FloodWait: link=%s remaining=%ds",
+                parsed.normalized,
+                cooldown_remaining,
+            )
+            return
+
         try:
             entity = await self._tg.resolve_entity(parsed.normalized)
         except Exception as exc:

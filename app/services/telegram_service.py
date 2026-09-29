@@ -128,6 +128,10 @@ class TelegramUserService:
         self._running = False
         self._join_lock = asyncio.Lock()
         self._last_join_at: float = 0.0
+        # Telegram can rate-limit entity lookups for many hours. Keep the
+        # cooldown in memory so discovery, the review screen, and schedulers
+        # stop issuing duplicate RPCs until Telegram allows them again.
+        self._entity_resolve_cooldown_until: float = 0.0
 
     async def _throttle_join(self) -> None:
         """
@@ -199,6 +203,26 @@ class TelegramUserService:
     def is_running(self) -> bool:
         return self._running and self.client.is_connected()
 
+    def entity_resolve_cooldown_remaining(self) -> int:
+        """Return the current entity-lookup cooldown in whole seconds."""
+        remaining = self._entity_resolve_cooldown_until - asyncio.get_event_loop().time()
+        return max(0, int(remaining))
+
+    def _set_entity_resolve_cooldown(self, seconds: int) -> None:
+        """Record a Telegram FloodWait without extending it on every retry."""
+        if seconds <= 0:
+            return
+        loop = asyncio.get_event_loop()
+        requested_until = loop.time() + seconds
+        self._entity_resolve_cooldown_until = max(
+            self._entity_resolve_cooldown_until,
+            requested_until,
+        )
+        logger.warning(
+            "Telegram entity lookups paused for %ds after FloodWait",
+            self.entity_resolve_cooldown_remaining(),
+        )
+
     async def resolve_entity(self, link: str) -> Any | None:
         """Resolve a Telegram link to an entity.
         Supports both public username links and private invite links.
@@ -229,6 +253,15 @@ class TelegramUserService:
                 link,
             )
             return None
+        except FloodWaitError as exc:
+            self._set_entity_resolve_cooldown(int(getattr(exc, "seconds", 0) or 0))
+            logger.warning(
+                "telegram_entity_resolve_rate_limited link=%s type=%s wait_seconds=%s",
+                parsed.normalized,
+                parsed.type,
+                getattr(exc, "seconds", "unknown"),
+            )
+            raise
         except Exception as exc:
             logger.error(
                 "telegram_entity_resolve_error link=%s type=%s error_type=%s error=%s",
