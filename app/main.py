@@ -147,6 +147,47 @@ async def _init_db() -> None:
             "ADD COLUMN IF NOT EXISTS type link_type NOT NULL DEFAULT 'username'"
         ))
 
+    # Older deployments created link_status from the Python enum member names
+    # (for example, "REJECTED"), while the current model stores the explicit
+    # lower-case values. Add the complete current value set first, commit that
+    # DDL, and only then normalize old rows. Doing the update in a second
+    # transaction is required by PostgreSQL before newly-added enum values can
+    # be used.
+    async with engine.begin() as conn:
+        for value in (
+            "pending",
+            "approved",
+            "rejected",
+            "joined",
+            "failed",
+            "expired",
+            "request_sent",
+            "skipped_not_group",
+        ):
+            await conn.execute(text(
+                f"ALTER TYPE link_status ADD VALUE IF NOT EXISTS '{value}'"
+            ))
+
+    async with engine.begin() as conn:
+        for legacy_value, current_value in (
+            ("PENDING", "pending"),
+            ("APPROVED", "approved"),
+            ("REJECTED", "rejected"),
+            ("JOINED", "joined"),
+            ("FAILED", "failed"),
+            ("EXPIRED", "expired"),
+            ("REQUEST_SENT", "request_sent"),
+            ("SKIPPED_NOT_GROUP", "skipped_not_group"),
+        ):
+            await conn.execute(text(
+                "UPDATE discovered_links "
+                "SET status = CAST(:current_value AS link_status) "
+                "WHERE status::text = :legacy_value"
+            ), {
+                "current_value": current_value,
+                "legacy_value": legacy_value,
+            })
+
     # Backfill the canonical key/type added after the first production schema.
     # Duplicate legacy rows are merged by canonical key before the unique index
     # is created, preserving a JOINED row when one already exists.

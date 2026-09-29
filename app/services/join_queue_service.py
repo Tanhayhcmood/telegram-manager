@@ -445,6 +445,11 @@ class JoinQueueService:
                 settings.FLOOD_WAIT_MARGIN_SECONDS,
             )
             await asyncio.sleep(total_wait)
+            # _consume_loop removes the current task from _queued_ids in its
+            # finally block, so remove it here before re-enqueueing. Otherwise
+            # enqueue() sees the current task as a duplicate and silently
+            # drops the retry.
+            self._queued_ids.discard(task.group_id)
             await self.enqueue(
                 group_id=task.group_id,
                 link=task.link,
@@ -480,7 +485,11 @@ class JoinQueueService:
                     f"وضعیت: <b>PENDING</b> (تلاش مجدد بعد از رفع محدودیت)",
                 )
             except Exception:
-                pass
+                logger.exception(
+                    "PeerFlood admin notification failed group_id=%d link=%s",
+                    task.group_id,
+                    task.link,
+                )
             # Keep DB status as PENDING — not a permanent failure
             return
 
@@ -583,6 +592,7 @@ class JoinQueueService:
                     group.status = GroupStatus.APPROVED  # awaiting Telegram admin approval
                     if discovered_link:
                         discovered_link.status = LinkStatus.REQUEST_SENT
+                        discovered_link.notes = join_error
                     logger.info(
                         "group_id=%d (%r): join request sent — status=APPROVED (awaiting Telegram admin)",
                         task.group_id, task.title,
@@ -596,7 +606,8 @@ class JoinQueueService:
                 else:
                     group.status = GroupStatus.FAILED
                     if discovered_link:
-                        discovered_link.status = LinkStatus.FAILED
+                        discovered_link.status = self._link_status_for_join_error(join_error)
+                        discovered_link.notes = join_error
 
                 if join_error == "request_sent":
                     log_action = "group_join_requested"
@@ -615,7 +626,8 @@ class JoinQueueService:
                     details=(
                         f"group_id={real_group_id or task.group_id} "
                         f"title={task.title!r} attempt={task.attempt_number} "
-                        f"daily={self._daily_join_count}/{settings.MAX_JOINS_PER_DAY}"
+                        f"daily={self._daily_join_count}/{settings.MAX_JOINS_PER_DAY} "
+                        f"error={join_error or 'none'}"
                     ),
                 )
                 if join_error == "request_sent":
@@ -633,11 +645,12 @@ class JoinQueueService:
                     )
             elif discovered_link:
                 discovered_link.status = (
-                    LinkStatus.JOINED if success
-                    else LinkStatus.REQUEST_SENT if join_error == "request_sent"
-                    else LinkStatus.EXPIRED if join_error and join_error.startswith("expired:")
-                    else LinkStatus.FAILED
+                    LinkStatus.JOINED
+                    if success
+                    else self._link_status_for_join_error(join_error)
                 )
+                if join_error:
+                    discovered_link.notes = join_error
 
             await session.commit()
 
@@ -718,7 +731,20 @@ class JoinQueueService:
                 parse_mode="HTML",
             )
         except Exception:
-            pass
+            logger.exception(
+                "Admin notification failed for join task group_id=%d link=%s",
+                task.group_id,
+                task.link,
+            )
+
+    @staticmethod
+    def _link_status_for_join_error(join_error: str | None) -> LinkStatus:
+        """Map the Telegram join result to the durable discovered-link status."""
+        if join_error == "request_sent":
+            return LinkStatus.REQUEST_SENT
+        if join_error and join_error.startswith("expired:"):
+            return LinkStatus.EXPIRED
+        return LinkStatus.FAILED
 
     async def _notify_admins(self, task: JoinTask, success: bool) -> None:
         try:
@@ -735,4 +761,8 @@ class JoinQueueService:
                 parse_mode="HTML",
             )
         except Exception:
-            pass
+            logger.exception(
+                "Admin join notification failed group_id=%d link=%s",
+                task.group_id,
+                task.link,
+            )
