@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from app.database.connection import AsyncSessionLocal
+from app.handlers.callback_utils import safe_callback_answer
 from app.repositories import GroupRepository
 from app.models.group import GroupStatus
 from app.services.broadcast_queue_service import BroadcastQueueService
@@ -38,7 +39,7 @@ def _target_keyboard() -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data == "broadcast")
 async def cb_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     bqs = BroadcastQueueService.get_instance()
     if bqs.is_active():
         await callback.message.edit_text(  # type: ignore[union-attr]
@@ -55,11 +56,12 @@ async def cb_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("bc_target:"), BroadcastStates.waiting_target)
 async def cb_target(callback: CallbackQuery, state: FSMContext) -> None:
+    await safe_callback_answer(callback)
     target = callback.data.split(":")[1]  # type: ignore[union-attr]
     await state.update_data(target=target)
     await state.set_state(BroadcastStates.waiting_content)
     label = "گروه‌ها" if target == "groups" else "کاربران"
-    await callback.answer()
+    await safe_callback_answer(callback)
     await callback.message.edit_text(  # type: ignore[union-attr]
         f"📨 ارسال به <b>{label}</b>\n\nپیام خود را ارسال کنید.\n"
         "پشتیبانی: متن، عکس، ویدیو، فایل، فوروارد\n\n<i>برای لغو /cancel</i>",
@@ -192,16 +194,18 @@ async def receive_content(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "bc_cancel")
 async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await safe_callback_answer(callback)
     await state.clear()
-    await callback.answer("لغو شد.")
+    await safe_callback_answer(callback, "لغو شد.")
     await callback.message.edit_text("❌ لغو شد.", reply_markup=_back_btn())  # type: ignore[union-attr]
 
 
 @router.callback_query(F.data == "bc_confirm", BroadcastStates.confirming)
 async def cb_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    await safe_callback_answer(callback)
     data = await state.get_data()
     await state.clear()
-    await callback.answer()
+    await safe_callback_answer(callback)
 
     bqs = BroadcastQueueService.get_instance()
     actor_id = callback.from_user.id if callback.from_user else 0

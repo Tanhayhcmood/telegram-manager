@@ -9,6 +9,7 @@ Fixes applied:
   3. cb_groups_failed: add full pagination support (was limited to 20 with no next page).
 """
 import hashlib
+import asyncio
 import time
 from html import escape as _esc
 from aiogram import Router, F
@@ -20,6 +21,7 @@ from app.database.connection import AsyncSessionLocal
 from app.repositories import GroupRepository
 from app.repositories.join_attempt_repository import JoinAttemptRepository
 from app.models.group import GroupStatus
+from app.handlers.callback_utils import safe_callback_answer
 from app.services.group_title_service import (
     fallback_group_title,
     resolve_group_titles,
@@ -31,8 +33,10 @@ logger = get_logger(__name__)
 router = Router(name="groups")
 
 PAGE_SIZE = 15
-PENDING_SCAN_LIMIT = 10_000
+PENDING_SCAN_LIMIT = PAGE_SIZE * 4
 PENDING_GROUP_CACHE_TTL = 15 * 60
+PENDING_CLASSIFY_CONCURRENCY = 4
+PENDING_CLASSIFY_TIMEOUT = 4.0
 
 # Older deployments could create a pending row before the Telegram entity was
 # checked. Cache the live classification so opening the review screen does not
@@ -81,21 +85,31 @@ async def _classify_pending_group(group) -> tuple[bool, str | None]:
 
 async def _only_actual_groups(groups: list) -> list:
     """Keep actual groups and carry their live titles into the review panel."""
-    actual_groups = []
-    for group in groups:
-        try:
-            is_group, live_title = await _classify_pending_group(group)
-            if is_group:
-                actual_groups.append((group, live_title))
-        except Exception as exc:
-            # Do not hide a real group because one entity lookup failed.
-            logger.warning(
-                "Could not classify pending row %d; keeping it visible: %s",
-                group.group_id,
-                exc,
-            )
-            actual_groups.append((group, fallback_group_title(group)))
-    return actual_groups
+    semaphore = asyncio.Semaphore(PENDING_CLASSIFY_CONCURRENCY)
+
+    async def classify(group) -> tuple[object, bool, str | None]:
+        async with semaphore:
+            try:
+                is_group, live_title = await asyncio.wait_for(
+                    _classify_pending_group(group),
+                    timeout=PENDING_CLASSIFY_TIMEOUT,
+                )
+                return group, is_group, live_title
+            except Exception as exc:
+                # Do not hide a real group because one entity lookup failed.
+                logger.debug(
+                    "Could not classify pending row %d quickly; keeping it visible: %s",
+                    group.group_id,
+                    exc,
+                )
+                return group, True, fallback_group_title(group)
+
+    classified = await asyncio.gather(*(classify(group) for group in groups))
+    return [
+        (group, live_title)
+        for group, is_group, live_title in classified
+        if is_group
+    ]
 
 
 def _back_btn() -> InlineKeyboardMarkup:
@@ -142,7 +156,7 @@ async def cb_groups_page(callback: CallbackQuery) -> None:
 
 
 async def _show_groups_page(callback: CallbackQuery, page: int) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
         total = await repo.count()
@@ -183,19 +197,22 @@ async def cb_pending_page(callback: CallbackQuery) -> None:
 
 
 async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
+        pending_total = await repo.count_by_status(GroupStatus.PENDING)
         # Read pending candidates first, then validate their live Telegram
         # entity type. This removes legacy bot/channel rows that were stored
         # before discovery enforced group-only validation.
-        pending = await repo.get_by_status(
-            GroupStatus.PENDING, limit=PENDING_SCAN_LIMIT
+        pending = await repo.get_by_status_paged(
+            GroupStatus.PENDING,
+            limit=PENDING_SCAN_LIMIT,
+            offset=page * PAGE_SIZE,
         )
 
     groups = await _only_actual_groups(pending)
-    total = len(groups)
-    groups = groups[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    total = pending_total
+    groups = groups[:PAGE_SIZE]
 
     if not groups:
         await callback.message.edit_text("✅ هیچ گروهی در انتظار بررسی نیست.", reply_markup=_back_btn())  # type: ignore[union-attr]
@@ -241,6 +258,7 @@ async def cb_approve(callback: CallbackQuery) -> None:
     join. The group would sit in APPROVED state forever with no join attempt made.
     Now we also call JoinQueueService.enqueue() so the join happens automatically.
     """
+    await safe_callback_answer(callback)
     group_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
     actor = str(callback.from_user.id) if callback.from_user else "admin"
 
@@ -250,7 +268,7 @@ async def cb_approve(callback: CallbackQuery) -> None:
         log_repo = LogRepository(session)
         group = await repo.get_by_group_id(group_id)
         if not group:
-            await callback.answer("گروه یافت نشد.", show_alert=True)
+            await safe_callback_answer(callback, "گروه یافت نشد.", show_alert=True)
             return
 
         group.status = GroupStatus.APPROVED
@@ -273,13 +291,14 @@ async def cb_approve(callback: CallbackQuery) -> None:
         from app.services.join_queue_service import JoinQueueService
         jq = JoinQueueService.get_instance()
         await jq.enqueue(group_id=group_id, link=invite_link, title=title, attempt=1)
-        await callback.answer(f"✅ گروه تایید شد و در صف عضویت قرار گرفت.")
+        await safe_callback_answer(callback, "✅ گروه تایید شد و در صف عضویت قرار گرفت.")
         logger.info(
             "Admin %s approved group_id=%d (%r) — enqueued for join",
             actor, group_id, title,
         )
     else:
-        await callback.answer(
+        await safe_callback_answer(
+            callback,
             f"✅ گروه {group_id} تایید شد (بدون لینک — عضویت دستی لازم است).",
             show_alert=True,
         )
@@ -291,6 +310,7 @@ async def cb_approve(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("reject:"))
 async def cb_reject(callback: CallbackQuery) -> None:
+    await safe_callback_answer(callback)
     group_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
     actor = str(callback.from_user.id) if callback.from_user else "admin"
     async with AsyncSessionLocal() as session:
@@ -302,9 +322,9 @@ async def cb_reject(callback: CallbackQuery) -> None:
             group.status = GroupStatus.REJECTED
             await log_repo.add(action="group_rejected", result="success", actor=actor, target=str(group_id))
             await session.commit()
-            await callback.answer(f"❌ گروه {group_id} رد شد.")
+            await safe_callback_answer(callback, f"❌ گروه {group_id} رد شد.")
         else:
-            await callback.answer("گروه یافت نشد.", show_alert=True)
+            await safe_callback_answer(callback, "گروه یافت نشد.", show_alert=True)
 
 
 # ── Failed groups with full pagination ────────────────────────────────────────
@@ -323,7 +343,7 @@ async def cb_failed_page(callback: CallbackQuery) -> None:
 
 
 async def _show_failed_page(callback: CallbackQuery, page: int) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
         total = await repo.count_by_status(GroupStatus.FAILED)
@@ -375,6 +395,7 @@ async def _show_failed_page(callback: CallbackQuery, page: int) -> None:
 
 @router.callback_query(F.data.startswith("retry_join:"))
 async def cb_retry_join(callback: CallbackQuery) -> None:
+    await safe_callback_answer(callback)
     group_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
     invite_link: str | None = None
     title: str | None = None
@@ -385,7 +406,7 @@ async def cb_retry_join(callback: CallbackQuery) -> None:
         attempt_repo = JoinAttemptRepository(session)
         group = await repo.get_by_group_id(group_id)
         if not group or not group.invite_link:
-            await callback.answer("گروه یا لینک یافت نشد.", show_alert=True)
+            await safe_callback_answer(callback, "گروه یا لینک یافت نشد.", show_alert=True)
             return
 
         attempt_count = await attempt_repo.count_for_group(group_id)
@@ -397,7 +418,8 @@ async def cb_retry_join(callback: CallbackQuery) -> None:
         if group.status == GroupStatus.APPROVED:
             has_pending = await attempt_repo.has_pending_approval_attempt(group_id)
             if has_pending:
-                await callback.answer(
+                await safe_callback_answer(
+                    callback,
                     "⏳ درخواست عضویت قبلاً ارسال شده و در انتظار تأیید ادمین گروه است.",
                     show_alert=True,
                 )
@@ -405,7 +427,8 @@ async def cb_retry_join(callback: CallbackQuery) -> None:
 
     max_attempts = 3
     if attempt_count >= max_attempts:
-        await callback.answer(
+        await safe_callback_answer(
+            callback,
             f"⚠️ حداکثر تعداد تلاش ({max_attempts} بار) رسیده.",
             show_alert=True,
         )
@@ -436,7 +459,8 @@ async def cb_retry_join(callback: CallbackQuery) -> None:
         title=title,
         attempt=attempt_count + 1,
     )
-    await callback.answer(
+    await safe_callback_answer(
+        callback,
         f"🔄 گروه {group_id} در صف تلاش مجدد ({attempt_count + 1}/{max_attempts}) قرار گرفت.",
         show_alert=True,
     )
@@ -451,7 +475,7 @@ async def cb_retry_join(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "retry_all_failed")
 async def cb_retry_all_failed(callback: CallbackQuery) -> None:
-    await callback.answer("⏳ در حال افزودن به صف...")
+    await safe_callback_answer(callback, "⏳ در حال افزودن به صف...")
     from app.services.join_queue_service import JoinQueueService
     jq = JoinQueueService.get_instance()
 

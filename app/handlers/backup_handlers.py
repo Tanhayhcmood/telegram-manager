@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
+from app.handlers.callback_utils import safe_callback_answer
 from app.services.backup_service import BackupService
 from app.utils.logger import get_logger
 
@@ -26,7 +27,7 @@ def _backup_menu_keyboard() -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data == "backup_menu")
 async def cb_backup_menu(callback: CallbackQuery) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     await callback.message.edit_text(  # type: ignore[union-attr]
         "💾 <b>مدیریت بکاپ</b>\n\nانتخاب کنید:",
         parse_mode="HTML",
@@ -36,7 +37,7 @@ async def cb_backup_menu(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "backup_create")
 async def cb_backup_create(callback: CallbackQuery) -> None:
-    await callback.answer("⏳ در حال ساخت بکاپ...", show_alert=False)
+    await safe_callback_answer(callback, "⏳ در حال ساخت بکاپ...", show_alert=False)
     await callback.message.edit_text("⏳ در حال ساخت بکاپ دیتابیس...")  # type: ignore[union-attr]
 
     actor = str(callback.from_user.id) if callback.from_user else "admin"
@@ -57,7 +58,7 @@ async def cb_backup_create(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "backup_list")
 async def cb_backup_list(callback: CallbackQuery) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     backups = _backup_service.list_backups()
 
     if not backups:

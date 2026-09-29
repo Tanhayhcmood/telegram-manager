@@ -3,6 +3,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from datetime import datetime, timezone
 from html import escape as _esc
 
+from app.handlers.callback_utils import safe_callback_answer
 from app.services.stats_service import StatsService
 from app.utils.logger import get_logger
 
@@ -20,7 +21,7 @@ def _back_btn() -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data == "stats")
 async def cb_stats(callback: CallbackQuery) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     s = await _stats_service.get_stats()
 
     now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")

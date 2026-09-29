@@ -8,6 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime, timezone
 from html import escape as _esc
 from app.config import settings
+from app.handlers.callback_utils import safe_callback_answer
 from app.services.runtime_config_service import RuntimeConfigService
 from app.utils.logger import get_logger
 
@@ -173,7 +174,7 @@ async def cmd_queue_status(message: Message) -> None:
 @router.callback_query(F.data == "queue_status")
 async def cb_queue_status(callback: CallbackQuery) -> None:
     """وضعیت صف عضویت — همه اعداد از StatsService (منبع واحد)."""
-    await callback.answer()
+    await safe_callback_answer(callback)
     from app.services.stats_service import StatsService
     from app.services.join_queue_service import JoinQueueService
     import asyncio as _asyncio
@@ -230,7 +231,7 @@ async def cb_queue_status(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "resume_queue")
 async def cb_resume_queue(callback: CallbackQuery) -> None:
     """از سرگیری دستی صف عضویت متوقف‌شده."""
-    await callback.answer()
+    await safe_callback_answer(callback)
     from app.services.join_queue_service import JoinQueueService
     jq = JoinQueueService.get_instance()
     if jq.is_paused():
@@ -249,7 +250,7 @@ def _recent_groups_keyboard() -> InlineKeyboardMarkup:
 @router.callback_query(F.data == "recent_groups")
 async def cb_recent_groups(callback: CallbackQuery) -> None:
     """۲ گروهی که اخیراً عضو شده‌ایم، همراه با آمار دقیق و لحظه‌ای (زنده از تلگرام)."""
-    await callback.answer()
+    await safe_callback_answer(callback)
 
     import asyncio
 
@@ -357,7 +358,7 @@ def _join_delay_text() -> str:
 
 @router.callback_query(F.data == "join_delay_menu")
 async def cb_join_delay_menu(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     # Clear any leftover "waiting_custom" FSM state from a prior visit — e.g.
     # if the admin tapped "custom" then navigated back here via the button
     # instead of /cancel. Without this, the next text message they send would
@@ -382,12 +383,13 @@ async def _apply_join_delay_minutes(average_minutes: float) -> tuple[int, int]:
 
 @router.callback_query(F.data.startswith("jd_preset:"))
 async def cb_join_delay_preset(callback: CallbackQuery) -> None:
+    await safe_callback_answer(callback)
     minutes = int(callback.data.split(":")[1])  # type: ignore[union-attr]
     try:
         await _apply_join_delay_minutes(minutes)
-        await callback.answer(f"✅ فاصله عضویت روی {minutes} دقیقه تنظیم شد.", show_alert=True)
+        await safe_callback_answer(callback, f"✅ فاصله عضویت روی {minutes} دقیقه تنظیم شد.", show_alert=True)
     except ValueError as exc:
-        await callback.answer(f"❌ {exc}", show_alert=True)
+        await safe_callback_answer(callback, f"❌ {exc}", show_alert=True)
         return
     actor = callback.from_user.id if callback.from_user else "?"
     logger.info("Join delay changed by admin %s → %d min average", actor, minutes)
@@ -401,7 +403,7 @@ async def cb_join_delay_preset(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "jd_custom")
 async def cb_join_delay_custom(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     await state.set_state(JoinDelayStates.waiting_custom)
     await _safe_edit(
         callback,
@@ -451,7 +453,7 @@ async def receive_join_delay_custom(message: Message, state: FSMContext) -> None
 
 @router.callback_query(F.data == "system_health")
 async def cb_system_health(callback: CallbackQuery) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     from app.services import TelegramUserService, HealthService, JoinQueueService
     from app.services.broadcast_queue_service import BroadcastQueueService
     from app.services.stats_service import StatsService
@@ -508,10 +510,12 @@ async def cb_system_health(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "cancel_broadcast_cb")
 async def cb_cancel_broadcast(callback: CallbackQuery) -> None:
+    await safe_callback_answer(callback)
     from app.services.broadcast_queue_service import BroadcastQueueService
     bqs = BroadcastQueueService.get_instance()
     cancelled = bqs.cancel_active()
-    await callback.answer(
+    await safe_callback_answer(
+        callback,
         "🛑 Broadcast لغو شد." if cancelled else "⚠️ تسک پیدا نشد.",
         show_alert=True,
     )
@@ -520,41 +524,43 @@ async def cb_cancel_broadcast(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "system_start")
 async def cb_system_start(callback: CallbackQuery) -> None:
+    await safe_callback_answer(callback)
     from app.services import TelegramUserService, JoinQueueService, HealthService
     tg = TelegramUserService.get_instance()
     if tg.is_running():
-        await callback.answer("سیستم در حال اجرا است.", show_alert=True)
+        await safe_callback_answer(callback, "سیستم در حال اجرا است.", show_alert=True)
         return
     try:
         await tg.start()
         await JoinQueueService.get_instance().start()
         await HealthService.get_instance().start()
         actor = callback.from_user.id if callback.from_user else "?"
-        await callback.answer("✅ سیستم شروع شد.", show_alert=True)
+        await safe_callback_answer(callback, "✅ سیستم شروع شد.", show_alert=True)
         logger.info("System started by admin %s", actor)
     except Exception as exc:
-        await callback.answer(f"❌ خطا: {exc}", show_alert=True)
+        await safe_callback_answer(callback, f"❌ خطا: {exc}", show_alert=True)
 
 
 @router.callback_query(F.data == "system_stop")
 async def cb_system_stop(callback: CallbackQuery) -> None:
+    await safe_callback_answer(callback)
     from app.services import TelegramUserService, JoinQueueService, HealthService
     tg = TelegramUserService.get_instance()
     if not tg.is_running():
-        await callback.answer("سیستم متوقف است.", show_alert=True)
+        await safe_callback_answer(callback, "سیستم متوقف است.", show_alert=True)
         return
     await HealthService.get_instance().stop()
     await JoinQueueService.get_instance().stop()
     await tg.stop()
     actor = callback.from_user.id if callback.from_user else "?"
-    await callback.answer("⏹ سیستم متوقف شد.", show_alert=True)
+    await safe_callback_answer(callback, "⏹ سیستم متوقف شد.", show_alert=True)
     logger.info("System stopped by admin %s", actor)
 
 
 @router.callback_query(F.data == "error_logs")
 async def cb_error_logs(callback: CallbackQuery) -> None:
     """Show recent error entries from the logs table."""
-    await callback.answer()
+    await safe_callback_answer(callback)
     from app.database.connection import AsyncSessionLocal
     from app.repositories import LogRepository
 
@@ -605,7 +611,7 @@ def _back_btn() -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data == "main_menu")
 async def cb_main_menu(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     # Clear any leftover FSM state (e.g. mid-flow "waiting for custom join
     # delay") so returning to the main menu never leaves a stale input trap.
     await state.clear()
@@ -624,7 +630,7 @@ async def cb_instant_cleanup(callback: CallbackQuery) -> None:
     """پاکسازی آنی: گروه‌هایی که اکانت دیگر عضو آن‌ها نیست (بن/اخراج/ترک) را
     فوراً از وضعیت «عضو» خارج می‌کند، بدون نیاز به منتظر ماندن برای
     همگام‌سازی خودکار هر ۳ ساعت یکبار."""
-    await callback.answer("در حال پاکسازی...")
+    await safe_callback_answer(callback, "در حال پاکسازی...")
     try:
         await callback.message.edit_text(  # type: ignore[union-attr]
             "🧹 <b>در حال پاکسازی آنی گروه‌ها...</b>\n\nلطفاً چند ثانیه صبر کنید.",
@@ -668,7 +674,7 @@ async def cb_instant_cleanup(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "sync_dialogs")
 async def cb_sync_dialogs(callback: CallbackQuery) -> None:
     """همگام‌سازی گروه‌های تلگرام با دیتابیس."""
-    await callback.answer()
+    await safe_callback_answer(callback)
     try:
         await callback.message.edit_text(  # type: ignore[union-attr]
             "⏳ <b>در حال همگام‌سازی گروه‌ها...</b>\n\nلطفاً چند ثانیه صبر کنید.",
@@ -700,7 +706,7 @@ async def cb_sync_dialogs(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "sync_users")
 async def cb_sync_users(callback: CallbackQuery) -> None:
     """همگام‌سازی PVهای شخصی اکانت با دیتابیس."""
-    await callback.answer()
+    await safe_callback_answer(callback)
     try:
         await callback.message.edit_text(  # type: ignore[union-attr]
             "⏳ <b>در حال همگام‌سازی مخاطبین...</b>\n\nلطفاً چند ثانیه صبر کنید.",

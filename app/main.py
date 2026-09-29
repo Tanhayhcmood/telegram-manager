@@ -14,6 +14,7 @@ from app.config import settings
 from app.utils.logger import get_logger, setup_logging
 from app.database.connection import engine, Base, AsyncSessionLocal
 from app.handlers import get_main_router
+from app.handlers.callback_utils import safe_callback_answer
 from app.services.dm_polling_service import polling_loop as dm_polling_loop
 from app.middlewares import AdminAuthMiddleware
 from app.services import (
@@ -295,7 +296,15 @@ async def main() -> None:
         if isinstance(exc, TelegramNetworkError):
             logger.warning("TelegramNetworkError: %s — aiogram will retry", exc)
             return True
-        return False
+        callback = getattr(getattr(event, "update", None), "callback_query", None)
+        if callback is not None:
+            await safe_callback_answer(
+                callback,
+                "❌ خطای موقت در اجرای این دکمه رخ داد. دوباره تلاش کنید.",
+                show_alert=True,
+            )
+        logger.error("Unhandled update error: %s", exc, exc_info=True)
+        return True
 
     # ── Layer 2: delete stale webhook + clear previous long-poll session ────────
     try:

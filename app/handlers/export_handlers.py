@@ -5,6 +5,7 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery, BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.database.connection import AsyncSessionLocal
+from app.handlers.callback_utils import safe_callback_answer
 from app.repositories import GroupRepository, ContactedUserRepository
 from app.utils.logger import get_logger
 
@@ -28,7 +29,7 @@ def _export_menu() -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data == "export_menu")
 async def cb_export_menu(callback: CallbackQuery) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     await callback.message.edit_text(  # type: ignore[union-attr]
         "📥 *خروجی داده*\n\nفرمت انتخاب کنید:",
         parse_mode="Markdown",
@@ -38,7 +39,7 @@ async def cb_export_menu(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "export_groups")
 async def cb_export_groups(callback: CallbackQuery) -> None:
-    await callback.answer("⏳ در حال ساخت فایل...")
+    await safe_callback_answer(callback, "⏳ در حال ساخت فایل...")
 
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
@@ -67,7 +68,7 @@ async def cb_export_groups(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "export_users")
 async def cb_export_users(callback: CallbackQuery) -> None:
-    await callback.answer("⏳ در حال ساخت فایل...")
+    await safe_callback_answer(callback, "⏳ در حال ساخت فایل...")
 
     async with AsyncSessionLocal() as session:
         repo = ContactedUserRepository(session)

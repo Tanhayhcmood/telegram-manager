@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from app.database.connection import AsyncSessionLocal
+from app.handlers.callback_utils import safe_callback_answer
 from app.repositories import GroupRepository
 from app.models.group import GroupStatus
 from app.services.broadcast_queue_service import BroadcastQueueService
@@ -31,7 +32,7 @@ def _back_btn() -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data == "send_message")
 async def cb_send_message(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     await state.set_state(SendMessageStates.waiting_content)
     await callback.message.edit_text(  # type: ignore[union-attr]
         "📨 *ارسال پیام به گروه‌ها*\n\n"
@@ -119,14 +120,15 @@ async def receive_content(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "cancel_send")
 async def cb_cancel_send(callback: CallbackQuery, state: FSMContext) -> None:
+    await safe_callback_answer(callback)
     await state.clear()
-    await callback.answer("لغو شد.")
+    await safe_callback_answer(callback, "لغو شد.")
     await callback.message.edit_text("❌ لغو شد.", reply_markup=_back_btn())  # type: ignore[union-attr]
 
 
 @router.callback_query(F.data == "confirm_content", SendMessageStates.confirming)
 async def cb_confirm_content(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     await state.set_state(SendMessageStates.selecting_targets)
 
     async with AsyncSessionLocal() as session:
@@ -161,6 +163,7 @@ async def cb_confirm_content(callback: CallbackQuery, state: FSMContext) -> None
 
 @router.callback_query(F.data.startswith("send_to:"), SendMessageStates.selecting_targets)
 async def cb_send_to_group(callback: CallbackQuery, state: FSMContext) -> None:
+    await safe_callback_answer(callback)
     group_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
     data = await state.get_data()
     await state.clear()
@@ -171,10 +174,10 @@ async def cb_send_to_group(callback: CallbackQuery, state: FSMContext) -> None:
             from_chat_id=data["content_chat_id"],
             message_id=data["content_message_id"],
         )
-        await callback.answer(f"✅ ارسال شد به گروه {group_id}.", show_alert=True)
+        await safe_callback_answer(callback, f"✅ ارسال شد به گروه {group_id}.", show_alert=True)
         logger.info("Message forwarded to group %d by admin %s", group_id, actor)
     except Exception as exc:
-        await callback.answer(f"❌ خطا: {exc}", show_alert=True)
+        await safe_callback_answer(callback, f"❌ خطا: {exc}", show_alert=True)
         logger.error("Failed to forward to %d: %s", group_id, exc)
 
 
@@ -187,6 +190,7 @@ async def cb_send_to_all(callback: CallbackQuery, state: FSMContext) -> None:
     Previously only from_chat_id + message_id were passed, causing Telethon
     to try forwarding from the bot's private chat (which it cannot access).
     """
+    await safe_callback_answer(callback)
     data = await state.get_data()
     await state.clear()
     bqs = BroadcastQueueService.get_instance()
@@ -205,7 +209,7 @@ async def cb_send_to_all(callback: CallbackQuery, state: FSMContext) -> None:
             forward_from_chat_id=data.get("forward_from_chat_id"),
             forward_from_message_id=data.get("forward_from_message_id"),
         )
-        await callback.answer()
+        await safe_callback_answer(callback)
         await callback.message.edit_text(  # type: ignore[union-attr]
             f"✅ *ارسال به همه گروه‌ها شروع شد* (job: `{job_id}`)\n\n"
             "در پس‌زمینه اجرا می‌شود — ربات همچنان پاسخگو است.\n"
@@ -214,4 +218,4 @@ async def cb_send_to_all(callback: CallbackQuery, state: FSMContext) -> None:
             reply_markup=_back_btn(),
         )
     except RuntimeError as exc:
-        await callback.answer(str(exc), show_alert=True)
+        await safe_callback_answer(callback, str(exc), show_alert=True)
