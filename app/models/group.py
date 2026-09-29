@@ -26,7 +26,11 @@ class Group(Base):
     members_count: Mapped[int | None] = mapped_column(Integer)
     join_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[GroupStatus] = mapped_column(
-        Enum(GroupStatus, name="group_status"),
+        Enum(
+            GroupStatus,
+            name="group_status",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
         default=GroupStatus.PENDING,
         nullable=False,
         index=True,
