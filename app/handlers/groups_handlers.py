@@ -9,6 +9,7 @@ Fixes applied:
   3. cb_groups_failed: add full pagination support (was limited to 20 with no next page).
 """
 import hashlib
+import time
 from html import escape as _esc
 from aiogram import Router, F
 from aiogram.filters import StateFilter
@@ -26,6 +27,64 @@ logger = get_logger(__name__)
 router = Router(name="groups")
 
 PAGE_SIZE = 15
+PENDING_SCAN_LIMIT = 10_000
+PENDING_GROUP_CACHE_TTL = 15 * 60
+
+# Older deployments could create a pending row before the Telegram entity was
+# checked. Cache the live classification so opening the review screen does not
+# resolve the same links on every click.
+_pending_group_cache: dict[tuple[int, str | None], tuple[float, bool]] = {}
+
+
+async def _is_actual_group(group) -> bool:
+    """Return False for pending rows that resolve to users, bots, or channels.
+
+    A failed lookup is treated as unknown rather than non-group. This keeps a
+    valid private invite visible during a temporary Telegram/API outage.
+    """
+    cache_key = (group.group_id, group.invite_link)
+    now = time.monotonic()
+    cached = _pending_group_cache.get(cache_key)
+    if cached and now - cached[0] < PENDING_GROUP_CACHE_TTL:
+        return cached[1]
+
+    from app.services.telegram_service import TelegramUserService
+
+    tg = TelegramUserService.get_instance()
+    if not tg.is_running():
+        return True
+
+    entity = await tg.resolve_entity(group.invite_link or group.group_id)
+    if entity is None:
+        return True
+
+    is_group = await tg.is_group(entity)
+    _pending_group_cache[cache_key] = (now, is_group)
+    if not is_group:
+        logger.info(
+            "Hiding non-group pending row %d (%r) from review panel",
+            group.group_id,
+            group.title,
+        )
+    return is_group
+
+
+async def _only_actual_groups(groups: list) -> list:
+    """Keep only rows confirmed by Telegram to be groups/supergroups."""
+    actual_groups = []
+    for group in groups:
+        try:
+            if await _is_actual_group(group):
+                actual_groups.append(group)
+        except Exception as exc:
+            # Do not hide a real group because one entity lookup failed.
+            logger.warning(
+                "Could not classify pending row %d; keeping it visible: %s",
+                group.group_id,
+                exc,
+            )
+            actual_groups.append(group)
+    return actual_groups
 
 
 def _back_btn() -> InlineKeyboardMarkup:
@@ -114,12 +173,16 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
     await callback.answer()
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
-        # DB-level count — no full table scan
-        total = await repo.count_by_status(GroupStatus.PENDING)
-        # DB-level paged fetch — only PAGE_SIZE rows loaded
-        groups = await repo.get_by_status_paged(
-            GroupStatus.PENDING, limit=PAGE_SIZE, offset=page * PAGE_SIZE
+        # Read pending candidates first, then validate their live Telegram
+        # entity type. This removes legacy bot/channel rows that were stored
+        # before discovery enforced group-only validation.
+        pending = await repo.get_by_status(
+            GroupStatus.PENDING, limit=PENDING_SCAN_LIMIT
         )
+
+    groups = await _only_actual_groups(pending)
+    total = len(groups)
+    groups = groups[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
 
     if not groups:
         await callback.message.edit_text("✅ هیچ گروهی در انتظار بررسی نیست.", reply_markup=_back_btn())  # type: ignore[union-attr]
