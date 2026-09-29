@@ -199,6 +199,7 @@ async def _init_db() -> None:
             select(DiscoveredLink).order_by(DiscoveredLink.id.asc())
         )).scalars().all())
         by_key: dict[str, DiscoveredLink] = {}
+        by_link: dict[str, DiscoveredLink] = {}
         for row in rows:
             parsed = LinkValidator.parse(row.link)
             if parsed is None:
@@ -210,7 +211,11 @@ async def _init_db() -> None:
                 normalized = parsed.normalized
                 link_type = LinkType(parsed.type)
 
-            duplicate = by_key.get(canonical_key)
+            # Legacy rows can collide either by canonical key or because
+            # different old spellings normalize to the same link. Resolve both
+            # cases before assigning row.link, otherwise the existing unique
+            # link index aborts startup during the commit.
+            duplicate = by_key.get(canonical_key) or by_link.get(normalized)
             if duplicate is not None:
                 if (
                     row.status == LinkStatus.JOINED
@@ -225,6 +230,7 @@ async def _init_db() -> None:
             row.canonical_key = canonical_key
             row.type = link_type
             by_key[canonical_key] = row
+            by_link[normalized] = row
         await session.commit()
 
     async with engine.begin() as conn:
