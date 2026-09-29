@@ -49,7 +49,7 @@ def _status_emoji(status: GroupStatus) -> str:
 
 
 async def _resolve_pending_title(title: str | None, invite_link: str | None) -> tuple[str, str | None]:
-    \"\"\"Resolve URL-shaped pending titles to the Telegram group name.\"\"\"
+    """Resolve URL-shaped pending titles to the Telegram group name."""
     raw = (title or "").strip()
     if not raw.lower().startswith(("http://", "https://")):
         return raw, None
