@@ -66,6 +66,70 @@ async def _resolve_pending_title(title: str | None, invite_link: str | None) -> 
         logger.debug("Could not resolve pending group title for %s: %s", link, exc)
     return raw, None
 
+
+async def _store_resolved_pending_titles(
+    rows: list[tuple[int, str | None, str | None, str | None]],
+) -> None:
+    """Resolve URL-shaped titles in the background without blocking Telegram callbacks."""
+    try:
+        resolved_rows = await asyncio.gather(*[
+            _resolve_pending_title(title, invite_link)
+            for _, title, invite_link, _ in rows
+        ])
+        resolved_updates = {}
+        for (group_id, original_title, _, _), (resolved_title, username) in zip(rows, resolved_rows):
+            if resolved_title and resolved_title != (original_title or "").strip():
+                resolved_updates[group_id] = (resolved_title, username)
+        if not resolved_updates:
+            return
+
+        async with AsyncSessionLocal() as session:
+            repo = GroupRepository(session)
+            for group_id, (resolved_title, username) in resolved_updates.items():
+                group = await repo.get_by_group_id(group_id)
+                if group is not None:
+                    group.title = resolved_title
+                    if username:
+                        group.username = username
+            await session.commit()
+    except Exception as exc:
+        logger.warning("Background pending-title resolution failed: %s", exc)
+
+
+async def _remove_pending_action_row(callback: CallbackQuery) -> None:
+    """Remove the clicked group's action row after approve/reject succeeds."""
+    message = callback.message
+    markup = message.reply_markup if message is not None else None
+    data = callback.data
+    if markup is None or not data:
+        return
+    rows = [
+        list(row)
+        for row in markup.inline_keyboard
+        if not any(button.callback_data == data for button in row)
+    ]
+    try:
+        await message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+        )  # type: ignore[union-attr]
+    except Exception as exc:
+        logger.debug("Could not remove processed pending-action row: %s", exc)
+
+
+async def _enqueue_approved_group(
+    group_id: int,
+    invite_link: str,
+    title: str | None,
+) -> None:
+    """Queue approved membership work without blocking the Telegram callback."""
+    try:
+        from app.services.join_queue_service import JoinQueueService
+        jq = JoinQueueService.get_instance()
+        await jq.enqueue(group_id=group_id, link=invite_link, title=title, attempt=1)
+    except Exception:
+        logger.exception("Failed to enqueue approved group_id=%d", group_id)
+
+
 def _list_keyboard(page: int, total: int, prefix: str) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     nav = []
@@ -159,37 +223,29 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
         await callback.message.edit_text("✅ هیچ گروهی در انتظار بررسی نیست.", reply_markup=_back_btn())  # type: ignore[union-attr]
         return
 
-    resolved_rows = await asyncio.gather(*[
-        _resolve_pending_title(title, invite_link)
-        for _, title, invite_link, _ in rows
-    ])
-    resolved_updates = {}
-    for (group_id, original_title, _, _), (resolved_title, username) in zip(rows, resolved_rows):
-        if resolved_title and resolved_title != (original_title or "").strip():
-            resolved_updates[group_id] = (resolved_title, username)
-    if resolved_updates:
-        async with AsyncSessionLocal() as session:
-            repo = GroupRepository(session)
-            for group_id, (resolved_title, username) in resolved_updates.items():
-                group = await repo.get_by_group_id(group_id)
-                if group is not None:
-                    group.title = resolved_title
-                    if username:
-                        group.username = username
-            await session.commit()
+    # Render immediately. Telegram callbacks must not wait for up to 15
+    # network resolutions (each one may take several seconds).
+    asyncio.create_task(_store_resolved_pending_titles(rows))
 
     total_pages = max(1, -(-total // PAGE_SIZE))
     lines = [f"⏳ <b>در انتظار بررسی</b> ({total} گروه — صفحه {page + 1} از {total_pages}):" + chr(10)]
     action_btns: list[list[InlineKeyboardButton]] = []
 
-    for (group_id, original_title, _, _), (resolved_title, _) in zip(rows, resolved_rows):
-        raw_title = (resolved_title or original_title or str(group_id))[:25]
+    for group_id, original_title, _, _ in rows:
+        raw_title = (original_title or str(group_id))[:25]
         safe_title = _esc(raw_title)
         lines.append(f"• <code>{group_id}</code> — {safe_title}")
         action_btns.append([
             InlineKeyboardButton(text=f"✅ {raw_title}", callback_data=f"approve:{group_id}"),
             InlineKeyboardButton(text="❌ رد", callback_data=f"reject:{group_id}"),
         ])
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        chr(10).join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=action_btns),
+    )
+
+
 # ── Approve / Reject ──────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("approve:"))
@@ -203,6 +259,8 @@ async def cb_approve(callback: CallbackQuery) -> None:
     """
     group_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
     actor = str(callback.from_user.id) if callback.from_user else "admin"
+    # Acknowledge immediately; DB writes and queueing must not hold Telegram's spinner.
+    await callback.answer("در حال پردازش…")
 
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
@@ -210,7 +268,7 @@ async def cb_approve(callback: CallbackQuery) -> None:
         log_repo = LogRepository(session)
         group = await repo.get_by_group_id(group_id)
         if not group:
-            await callback.answer("گروه یافت نشد.", show_alert=True)
+            await callback.message.answer("گروه یافت نشد.")  # type: ignore[union-attr]
             return
 
         group.status = GroupStatus.APPROVED
@@ -229,19 +287,18 @@ async def cb_approve(callback: CallbackQuery) -> None:
 
     # ── CRITICAL FIX: enqueue the group for joining ────────────────────────────
     # Without this, approve only changed the DB status but never triggered a join.
+    await _remove_pending_action_row(callback)
     if invite_link:
-        from app.services.join_queue_service import JoinQueueService
-        jq = JoinQueueService.get_instance()
-        await jq.enqueue(group_id=group_id, link=invite_link, title=title, attempt=1)
-        await callback.answer(f"✅ گروه تایید شد و در صف عضویت قرار گرفت.")
+        asyncio.create_task(
+            _enqueue_approved_group(group_id, invite_link, title)
+        )
         logger.info(
             "Admin %s approved group_id=%d (%r) — enqueued for join",
             actor, group_id, title,
         )
     else:
-        await callback.answer(
-            f"✅ گروه {group_id} تایید شد (بدون لینک — عضویت دستی لازم است).",
-            show_alert=True,
+        await callback.message.answer(  # type: ignore[union-attr]
+            f"✅ گروه {group_id} تایید شد (بدون لینک — عضویت دستی لازم است)."
         )
         logger.warning(
             "Admin approved group_id=%d but it has no invite_link — cannot auto-join",
@@ -253,6 +310,7 @@ async def cb_approve(callback: CallbackQuery) -> None:
 async def cb_reject(callback: CallbackQuery) -> None:
     group_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
     actor = str(callback.from_user.id) if callback.from_user else "admin"
+    await callback.answer("در حال پردازش…")
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
         from app.repositories import LogRepository
@@ -262,9 +320,10 @@ async def cb_reject(callback: CallbackQuery) -> None:
             group.status = GroupStatus.REJECTED
             await log_repo.add(action="group_rejected", result="success", actor=actor, target=str(group_id))
             await session.commit()
-            await callback.answer(f"❌ گروه {group_id} رد شد.")
+            await _remove_pending_action_row(callback)
+            await callback.message.answer(f"❌ گروه {group_id} رد شد.")  # type: ignore[union-attr]
         else:
-            await callback.answer("گروه یافت نشد.", show_alert=True)
+            await callback.message.answer("گروه یافت نشد.")  # type: ignore[union-attr]
 
 
 # ── Failed groups with full pagination ────────────────────────────────────────
