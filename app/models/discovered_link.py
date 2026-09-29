@@ -19,6 +19,7 @@ class DiscoveredLink(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     link: Mapped[str] = mapped_column(String(1024), nullable=False, unique=True, index=True)
+    canonical_key: Mapped[str] = mapped_column(String(1024), nullable=False, index=True)
     source: Mapped[str | None] = mapped_column(String(512))
     discovered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

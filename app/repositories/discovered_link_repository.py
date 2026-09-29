@@ -39,7 +39,12 @@ class DiscoveredLinkRepository(BaseRepository[DiscoveredLink]):
         existing = await self.get_by_link(link)
         if existing is not None:
             return existing, False
-        record = DiscoveredLink(link=link, source=source, status=LinkStatus.PENDING)
+        record = DiscoveredLink(
+            link=link,
+            canonical_key=link,
+            source=source,
+            status=LinkStatus.PENDING,
+        )
         self._session.add(record)
         await self._session.flush()
         await self._session.refresh(record)
