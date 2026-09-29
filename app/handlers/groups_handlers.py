@@ -8,7 +8,6 @@ Fixes applied:
      instead of loading 500 rows into memory and slicing.
   3. cb_groups_failed: add full pagination support (was limited to 20 with no next page).
 """
-import asyncio
 import hashlib
 from html import escape as _esc
 from aiogram import Router, F
@@ -23,7 +22,6 @@ from app.models.group import GroupStatus
 from app.utils.logger import get_logger
 from app.utils.validators import LinkValidator
 from app.services.live_group_state_service import LiveGroupStateService
-from app.services.telegram_service import TelegramUserService
 
 logger = get_logger(__name__)
 router = Router(name="groups")
@@ -47,24 +45,6 @@ def _status_emoji(status: GroupStatus) -> str:
         GroupStatus.LEFT:     "🚪",
     }.get(status, "❓")
 
-
-async def _resolve_pending_title(title: str | None, invite_link: str | None) -> tuple[str, str | None]:
-    """Resolve URL-shaped pending titles to the Telegram group name."""
-    raw = (title or "").strip()
-    if not raw.lower().startswith(("http://", "https://")):
-        return raw, None
-    link = (invite_link or raw).strip()
-    try:
-        tg = TelegramUserService.get_instance()
-        entity = await asyncio.wait_for(tg.resolve_entity(link), timeout=5)
-        if entity is not None:
-            _, resolved, username, _ = await tg.get_entity_info(entity)
-            resolved = (resolved or "").strip()
-            if resolved and not resolved.lower().startswith(("http://", "https://")):
-                return resolved, username.lower() if username else None
-    except Exception as exc:
-        logger.debug("Could not resolve pending group title for %s: %s", link, exc)
-    return raw, None
 
 def _list_keyboard(page: int, total: int, prefix: str) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
@@ -153,43 +133,39 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
         groups = await repo.get_by_status_paged(
             GroupStatus.PENDING, limit=PAGE_SIZE, offset=page * PAGE_SIZE
         )
-        rows = [(g.group_id, g.title, g.invite_link, g.username) for g in groups]
 
-    if not rows:
+    if not groups:
         await callback.message.edit_text("✅ هیچ گروهی در انتظار بررسی نیست.", reply_markup=_back_btn())  # type: ignore[union-attr]
         return
-
-    resolved_rows = await asyncio.gather(*[
-        _resolve_pending_title(title, invite_link)
-        for _, title, invite_link, _ in rows
-    ])
-    resolved_updates = {}
-    for (group_id, original_title, _, _), (resolved_title, username) in zip(rows, resolved_rows):
-        if resolved_title and resolved_title != (original_title or "").strip():
-            resolved_updates[group_id] = (resolved_title, username)
-    if resolved_updates:
-        async with AsyncSessionLocal() as session:
-            repo = GroupRepository(session)
-            for group_id, (resolved_title, username) in resolved_updates.items():
-                group = await repo.get_by_group_id(group_id)
-                if group is not None:
-                    group.title = resolved_title
-                    if username:
-                        group.username = username
-            await session.commit()
 
     total_pages = max(1, -(-total // PAGE_SIZE))
     lines = [f"⏳ <b>در انتظار بررسی</b> ({total} گروه — صفحه {page + 1} از {total_pages}):" + chr(10)]
     action_btns: list[list[InlineKeyboardButton]] = []
 
-    for (group_id, original_title, _, _), (resolved_title, _) in zip(rows, resolved_rows):
-        raw_title = (resolved_title or original_title or str(group_id))[:25]
-        safe_title = _esc(raw_title)
-        lines.append(f"• <code>{group_id}</code> — {safe_title}")
+    for g in groups:
+        raw_title = (g.title or str(g.group_id))[:25]
+        title = _esc(raw_title)
+        lines.append(f"• <code>{g.group_id}</code> — {title}")
         action_btns.append([
-            InlineKeyboardButton(text=f"✅ {raw_title}", callback_data=f"approve:{group_id}"),
-            InlineKeyboardButton(text="❌ رد", callback_data=f"reject:{group_id}"),
+            InlineKeyboardButton(text=f"✅ {raw_title}", callback_data=f"approve:{g.group_id}"),
+            InlineKeyboardButton(text="❌ رد", callback_data=f"reject:{g.group_id}"),
         ])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️ قبلی", callback_data=f"pending_page:{page - 1}"))
+    if (page + 1) * PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton(text="بعدی ▶️", callback_data=f"pending_page:{page + 1}"))
+    if nav:
+        action_btns.append(nav)
+    action_btns.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="main_menu")])
+
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        chr(10).join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=action_btns),
+    )
+
 # ── Approve / Reject ──────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("approve:"))
