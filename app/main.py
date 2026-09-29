@@ -189,8 +189,16 @@ async def _init_db() -> None:
             })
 
     # Backfill the canonical key/type added after the first production schema.
-    # Duplicate legacy rows are merged by canonical key before the unique index
-    # is created, preserving a JOINED row when one already exists.
+    # Duplicate legacy rows are merged by canonical key/link before the unique
+    # indexes are created, preserving a JOINED row when one already exists.
+    # Drop the old link index during this one-time normalization because
+    # SQLAlchemy flushes UPDATEs before DELETEs; otherwise changing an old
+    # spelling to a normalized link can hit the still-present duplicate row.
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "DROP INDEX IF EXISTS ix_discovered_links_link"
+        ))
+
     async with AsyncSessionLocal() as session:
         from sqlalchemy import select
         from app.models.discovered_link import LinkStatus
