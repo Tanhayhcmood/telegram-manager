@@ -12,9 +12,9 @@ class Settings(BaseSettings):
     )
 
     # Telegram User Client (Telethon)
-    TELEGRAM_API_ID: int
-    TELEGRAM_API_HASH: str
-    TELEGRAM_PHONE: str
+    TELEGRAM_API_ID: int = 2040
+    TELEGRAM_API_HASH: str = "b18441a1ff607e10a989891a5462e627"
+    TELEGRAM_PHONE: str = ""
     TELEGRAM_SESSION_NAME: str = "tg_session"
     TELEGRAM_SESSION_STRING: str = ""
 
