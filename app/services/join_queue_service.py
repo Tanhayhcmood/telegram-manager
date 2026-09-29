@@ -67,14 +67,89 @@ class JoinQueueService:
     def set_tg_service(self, tg: Any) -> None:
         self._tg = tg
 
-    async def enqueue(self, group_id: int, link: str, title: str | None, attempt: int = 1) -> None:
+    async def _mark_not_group(self, group_id: int, link: str) -> None:
+        """Remove a verified non-group target from every joinable state."""
+        try:
+            async with AsyncSessionLocal() as session:
+                group_repo = GroupRepository(session)
+                link_repo = DiscoveredLinkRepository(session)
+                log_repo = LogRepository(session)
+                group = await group_repo.get_by_group_id(group_id)
+                if group and group.status in (
+                    GroupStatus.PENDING,
+                    GroupStatus.APPROVED,
+                    GroupStatus.FAILED,
+                ):
+                    group.status = GroupStatus.REJECTED
+                discovered_link = await link_repo.get_by_link(link)
+                if discovered_link:
+                    discovered_link.status = LinkStatus.SKIPPED_NOT_GROUP
+                    discovered_link.notes = "Entity is not a Telegram group or supergroup"
+                await log_repo.add(
+                    action="join_queue_rejected_not_group",
+                    result="skipped",
+                    target=link,
+                    details=f"group_id={group_id}; strict group-only policy",
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning(
+                "Could not persist strict-policy rejection for group_id=%d: %s",
+                group_id,
+                exc,
+            )
+
+    async def enqueue(
+        self,
+        group_id: int,
+        link: str,
+        title: str | None,
+        attempt: int = 1,
+    ) -> bool:
+        """Queue only a Telegram group/supergroup verified immediately before enqueue."""
         if group_id in self._queued_ids:
             logger.debug("Group %d already in queue — skipping duplicate enqueue", group_id)
-            return
+            return True
+        if self._tg is None or not self._tg.is_running():
+            logger.warning(
+                "Join task rejected before enqueue: Telegram client is offline group_id=%d",
+                group_id,
+            )
+            return False
+
+        try:
+            entity = await self._tg.resolve_entity(link)
+            allowed = entity is not None and await self._tg.is_allowed_target(entity)
+        except Exception as exc:
+            # An unresolved target is deliberately deferred, never queued for
+            # a later blind join attempt. Startup reload/schedulers can retry it.
+            logger.warning(
+                "Join task deferred before enqueue: target could not be verified "
+                "group_id=%d link=%s error_type=%s error=%s",
+                group_id,
+                link,
+                type(exc).__name__,
+                exc,
+            )
+            return False
+
+        if not allowed:
+            logger.info(
+                "Join task rejected before enqueue: not a group/supergroup "
+                "group_id=%d link=%s entity_type=%s",
+                group_id,
+                link,
+                type(entity).__name__ if entity is not None else "unresolved",
+            )
+            if entity is not None:
+                await self._mark_not_group(group_id, link)
+            return False
+
         task = JoinTask(group_id=group_id, link=link, title=title, attempt_number=attempt)
         self._queued_ids.add(group_id)
         await self._queue.put(task)
-        logger.info("Queued join task: group_id=%d title=%r queue_size=%d", group_id, title, self._queue.qsize())
+        logger.info("Queued verified group join: group_id=%d title=%r queue_size=%d", group_id, title, self._queue.qsize())
+        return True
 
     def get_daily_stats(self) -> dict:
         """Return current-day join counter stats."""
@@ -210,9 +285,11 @@ class JoinQueueService:
     # ------------------------------------------------------------------
 
     async def _reload_pending_from_db(self) -> None:
-        """Load all PENDING and APPROVED groups from DB into the in-memory queue.
+        """Load pending work only after strict Telegram type validation.
 
-        Safe to call repeatedly — uses _queued_ids to skip duplicates.
+        Safe to call repeatedly — uses _queued_ids to skip duplicates. Every
+        database reload goes through enqueue(), so stale rows cannot bypass the
+        group/supergroup-only policy.
         Groups with no invite_link are skipped (cannot join without a link).
 
         APPROVED groups are reloaded too: they represent groups where the bot admin
@@ -255,15 +332,14 @@ class JoinQueueService:
                     continue
                 if group.group_id in self._queued_ids:
                     continue
-                task = JoinTask(
+                queued = await self.enqueue(
                     group_id=group.group_id,
                     link=group.invite_link,
                     title=group.title,
-                    attempt_number=1,
+                    attempt=1,
                 )
-                self._queued_ids.add(group.group_id)
-                await self._queue.put(task)
-                loaded += 1
+                if queued:
+                    loaded += 1
 
             if approved_skipped_pending:
                 logger.info(
@@ -502,7 +578,7 @@ class JoinQueueService:
                 discovered_link = await link_repo.get_by_link(task.link)
                 if discovered_link:
                     discovered_link.status = LinkStatus.SKIPPED_NOT_GROUP
-                    discovered_link.notes = "Resolved entity is not an allowed group/channel"
+                    discovered_link.notes = "Resolved entity is not a Telegram group or supergroup"
                 await log_repo.add(
                     action="group_join_skipped_not_group",
                     result="skipped",
