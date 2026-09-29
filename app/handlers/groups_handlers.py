@@ -130,6 +130,51 @@ async def _enqueue_approved_group(
         logger.exception("Failed to enqueue approved group_id=%d", group_id)
 
 
+async def _validate_pending_target(link: str | None) -> bool | None:
+    """Return True/False, or None when Telegram cannot verify the link now."""
+    if not link:
+        return False
+    tg = TelegramUserService.get_instance()
+    if not tg.is_running():
+        return None
+    try:
+        entity = await asyncio.wait_for(tg.resolve_entity(link), timeout=6)
+        if entity is None:
+            return False
+        return await tg.is_allowed_target(entity)
+    except Exception as exc:
+        logger.warning("Pending target validation failed for %s: %s", link, exc)
+        return None
+
+
+def _short_link(link: str | None) -> str:
+    value = (link or "بدون لینک").strip()
+    if len(value) > 48:
+        return value[:45] + "…"
+    return value
+
+
+async def _reject_pending_non_group(group_id: int) -> None:
+    """Persist the result when a legacy pending row is not a group target."""
+    try:
+        async with AsyncSessionLocal() as session:
+            repo = GroupRepository(session)
+            from app.repositories import LogRepository
+            log_repo = LogRepository(session)
+            group = await repo.get_by_group_id(group_id)
+            if group and group.status == GroupStatus.PENDING:
+                group.status = GroupStatus.REJECTED
+                await log_repo.add(
+                    action="pending_review_rejected_not_group",
+                    result="skipped",
+                    target=str(group_id),
+                    details="strict policy: target is not a Telegram group or supergroup",
+                )
+                await session.commit()
+    except Exception as exc:
+        logger.warning("Could not close legacy non-group pending row %d: %s", group_id, exc)
+
+
 def _list_keyboard(page: int, total: int, prefix: str) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     nav = []
@@ -220,27 +265,106 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
         rows = [(g.group_id, g.title, g.invite_link, g.username) for g in groups]
 
     if not rows:
-        await callback.message.edit_text("✅ هیچ گروهی در انتظار بررسی نیست.", reply_markup=_back_btn())  # type: ignore[union-attr]
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            "✅ <b>صف بررسی خالی است</b>\n\n"
+            "در حال حاضر گروه یا سوپرگروه جدیدی برای بررسی وجود ندارد.",
+            parse_mode="HTML",
+            reply_markup=_back_btn(),
+        )
         return
 
-    # Render immediately. Telegram callbacks must not wait for up to 15
-    # network resolutions (each one may take several seconds).
+    # Legacy rows are revalidated before they are shown. This keeps the review
+    # surface strict even when the database predates the group-only policy.
+    checks = await asyncio.gather(*[
+        _validate_pending_target(invite_link)
+        for _, _, invite_link, _ in rows
+    ])
+    verified_rows = []
+    rejected_ids = []
+    unresolved_count = 0
+    for row, allowed in zip(rows, checks):
+        if allowed is True:
+            verified_rows.append(row)
+        elif allowed is False:
+            rejected_ids.append(row[0])
+        else:
+            unresolved_count += 1
+    if rejected_ids:
+        await asyncio.gather(*[_reject_pending_non_group(group_id) for group_id in rejected_ids])
+    rows = verified_rows
+
+    if not rows:
+        suffix = (
+            f"\n\n⏳ {unresolved_count} مورد فعلاً قابل راستی‌آزمایی نیست و پنهان مانده است."
+            if unresolved_count else ""
+        )
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            "🛡 <b>مورد قابل تأیید در این صفحه وجود ندارد.</b>\n\n"
+            "فقط گروه و سوپرگروه در این بخش نمایش داده می‌شوند." + suffix,
+            parse_mode="HTML",
+            reply_markup=_back_btn(),
+        )
+        return
+
+    # Resolve URL-shaped titles in the background so the list opens instantly.
     asyncio.create_task(_store_resolved_pending_titles(rows))
 
     total_pages = max(1, -(-total // PAGE_SIZE))
-    lines = [f"⏳ <b>در انتظار بررسی</b> ({total} گروه — صفحه {page + 1} از {total_pages}):" + chr(10)]
+    page = min(max(page, 0), total_pages - 1)
+    lines = [
+        "🔎 <b>مرکز بررسی گروه‌ها</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"📦 صف فعلی: <b>{total}</b> مورد  •  📄 صفحه <b>{page + 1}</b> از <b>{total_pages}</b>",
+        "🛡 فقط <b>گروه</b> و <b>سوپرگروه</b> قابل تأیید و عضویت هستند.",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
     action_btns: list[list[InlineKeyboardButton]] = []
 
-    for group_id, original_title, _, _ in rows:
-        raw_title = (original_title or str(group_id))[:25]
+    for index, (group_id, original_title, invite_link, _) in enumerate(
+        rows, start=1 + page * PAGE_SIZE
+    ):
+        raw_title = " ".join((original_title or "بدون عنوان").split())[:32]
         safe_title = _esc(raw_title)
-        lines.append(f"• <code>{group_id}</code> — {safe_title}")
+        safe_link = _esc(_short_link(invite_link))
+        lines.append(
+            f"<b>{index:02d}</b>  🟣 <b>{safe_title}</b>\n"
+            f"      🔗 <code>{safe_link}</code>"
+        )
+        button_title = raw_title[:22] or str(group_id)
         action_btns.append([
-            InlineKeyboardButton(text=f"✅ {raw_title}", callback_data=f"approve:{group_id}"),
-            InlineKeyboardButton(text="❌ رد", callback_data=f"reject:{group_id}"),
+            InlineKeyboardButton(
+                text=f"✅ تأیید {button_title}",
+                callback_data=f"approve:{group_id}",
+            ),
+            InlineKeyboardButton(
+                text="❌ رد کردن",
+                callback_data=f"reject:{group_id}",
+            ),
         ])
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="◀️ قبلی", callback_data=f"pending_page:{page - 1}"
+            )
+        )
+    if (page + 1) * PAGE_SIZE < total:
+        nav.append(
+            InlineKeyboardButton(
+                text="بعدی ▶️", callback_data=f"pending_page:{page + 1}"
+            )
+        )
+    if nav:
+        action_btns.append(nav)
+    action_btns.append([
+        InlineKeyboardButton(
+            text="🔄 بروزرسانی صف", callback_data=f"pending_page:{page}"
+        ),
+        InlineKeyboardButton(text="🔙 منوی اصلی", callback_data="main_menu"),
+    ])
     await callback.message.edit_text(  # type: ignore[union-attr]
-        chr(10).join(lines),
+        "\n".join(lines),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=action_btns),
     )
@@ -250,17 +374,54 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
 
 @router.callback_query(F.data.startswith("approve:"))
 async def cb_approve(callback: CallbackQuery) -> None:
-    """
-    Approve a pending group and immediately enqueue it for joining.
-
-    FIX: Previously only set status=APPROVED in DB but never triggered the actual
-    join. The group would sit in APPROVED state forever with no join attempt made.
-    Now we also call JoinQueueService.enqueue() so the join happens automatically.
-    """
+    """Approve only after the target is re-verified as a group/supergroup."""
     group_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
     actor = str(callback.from_user.id) if callback.from_user else "admin"
-    # Acknowledge immediately; DB writes and queueing must not hold Telegram's spinner.
-    await callback.answer("در حال پردازش…")
+    await callback.answer("در حال راستی‌آزمایی گروه…")
+
+    async with AsyncSessionLocal() as session:
+        repo = GroupRepository(session)
+        group = await repo.get_by_group_id(group_id)
+        if not group:
+            await callback.message.answer(  # type: ignore[union-attr]
+                "❌ این مورد دیگر در صف بررسی نیست."
+            )
+            return
+        invite_link = group.invite_link
+        title = group.title
+
+    allowed = await _validate_pending_target(invite_link)
+    if allowed is None:
+        await callback.message.answer(  # type: ignore[union-attr]
+            "⚠️ <b>راستی‌آزمایی انجام نشد</b>\n\n"
+            "اتصال تلگرام یا اطلاعات لینک موقتاً در دسترس نیست. برای امنیت، "
+            "این مورد فعلاً تأیید نشد؛ چند لحظه بعد دوباره تلاش کنید.",
+            parse_mode="HTML",
+        )
+        return
+    if not allowed:
+        async with AsyncSessionLocal() as session:
+            repo = GroupRepository(session)
+            from app.repositories import LogRepository
+            log_repo = LogRepository(session)
+            group = await repo.get_by_group_id(group_id)
+            if group:
+                group.status = GroupStatus.REJECTED
+                await log_repo.add(
+                    action="group_rejected_not_group",
+                    result="skipped",
+                    actor=actor,
+                    target=str(group_id),
+                    details="strict policy: target is not a Telegram group or supergroup",
+                )
+                await session.commit()
+        await _remove_pending_action_row(callback)
+        await callback.message.answer(  # type: ignore[union-attr]
+            "🚫 <b>تأیید نشد</b>\n\n"
+            "این لینک گروه یا سوپرگروه نیست و برای عضویت نادیده گرفته شد.",
+            parse_mode="HTML",
+        )
+        return
 
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
@@ -268,42 +429,33 @@ async def cb_approve(callback: CallbackQuery) -> None:
         log_repo = LogRepository(session)
         group = await repo.get_by_group_id(group_id)
         if not group:
-            await callback.message.answer("گروه یافت نشد.")  # type: ignore[union-attr]
+            await callback.message.answer(  # type: ignore[union-attr]
+                "❌ این مورد دیگر در صف بررسی نیست."
+            )
             return
-
         group.status = GroupStatus.APPROVED
         await log_repo.add(
             action="group_approved",
             result="success",
             actor=actor,
             target=str(group_id),
-            details=f"title={group.title!r} link={group.invite_link!r}",
+            details=(
+                f"strict_target=group_or_supergroup title={group.title!r} "
+                f"link={group.invite_link!r}"
+            ),
         )
         await session.commit()
 
-        # Capture values needed for enqueueing after session closes
-        invite_link = group.invite_link
-        title = group.title
-
-    # ── CRITICAL FIX: enqueue the group for joining ────────────────────────────
-    # Without this, approve only changed the DB status but never triggered a join.
     await _remove_pending_action_row(callback)
-    if invite_link:
-        asyncio.create_task(
-            _enqueue_approved_group(group_id, invite_link, title)
-        )
-        logger.info(
-            "Admin %s approved group_id=%d (%r) — enqueued for join",
-            actor, group_id, title,
-        )
-    else:
-        await callback.message.answer(  # type: ignore[union-attr]
-            f"✅ گروه {group_id} تایید شد (بدون لینک — عضویت دستی لازم است)."
-        )
-        logger.warning(
-            "Admin approved group_id=%d but it has no invite_link — cannot auto-join",
-            group_id,
-        )
+    asyncio.create_task(_enqueue_approved_group(group_id, invite_link, title))
+    logger.info(
+        "Admin %s approved verified group_id=%d (%r) — enqueued for join",
+        actor, group_id, title,
+    )
+    await callback.message.answer(  # type: ignore[union-attr]
+        f"✅ <b>{_esc(title or str(group_id))}</b> تأیید شد و فقط در صف عضویت گروه‌ها قرار گرفت.",
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data.startswith("reject:"))
@@ -566,7 +718,7 @@ async def handle_admin_link(message: Message) -> None:
 
             is_group = await tg.is_group(entity)
             if not is_group:
-                results.append(f"⚠️ این یک کانال است نه گروه: <code>{normalized}</code>")
+                results.append(f"🚫 این لینک گروه یا سوپرگروه نیست و نادیده گرفته شد: <code>{normalized}</code>")
                 continue
 
             group_id, title, username, members_count = await tg.get_entity_info(entity)
@@ -605,15 +757,21 @@ async def handle_admin_link(message: Message) -> None:
                 await session.commit()
 
             jq = JoinQueueService.get_instance()
-            await jq.enqueue(group_id=group_id, link=normalized, title=title)
-            results.append(
-                f"✅ در صف عضویت: <b>{_esc(str(title or group_id))}</b>"
-                + (f" ({members_count:,} عضو)" if members_count else "")
-            )
-            logger.info(
-                "Admin manually queued group %d (%r) via direct link",
-                group_id, title,
-            )
+            queued = await jq.enqueue(group_id=group_id, link=normalized, title=title)
+            if queued:
+                results.append(
+                    f"✅ در صف عضویت: <b>{_esc(str(title or group_id))}</b>"
+                    + (f" ({members_count:,} عضو)" if members_count else "")
+                )
+                logger.info(
+                    "Admin manually queued verified group %d (%r) via direct link",
+                    group_id, title,
+                )
+            else:
+                results.append(
+                    f"⏳ <b>{_esc(str(title or group_id))}</b> شناسایی شد، "
+                    "اما تا تأیید دوباره‌ی نوع گروه وارد صف نمی‌شود."
+                )
 
         except Exception as exc:
             results.append(f"❌ خطا برای <code>{normalized}</code>: {exc}")
