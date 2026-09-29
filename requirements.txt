@@ -1,5 +1,4 @@
 aiogram==3.13.1
-aiogram-redis-provider==0.1.0
 telethon==1.36.0
 sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
