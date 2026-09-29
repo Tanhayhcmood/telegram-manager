@@ -24,6 +24,10 @@ class Group(Base):
     username: Mapped[str | None] = mapped_column(String(255), index=True)
     invite_link: Mapped[str | None] = mapped_column(String(1024))
     members_count: Mapped[int | None] = mapped_column(Integer)
+    # Only true after Telegram has confirmed that the target is a group or
+    # supergroup. Legacy rows default to false and stay out of pending review
+    # until the strict validation path confirms them.
+    verified_target: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     join_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[GroupStatus] = mapped_column(
         Enum(GroupStatus, name="group_status"),

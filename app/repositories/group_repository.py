@@ -47,10 +47,11 @@ class GroupRepository(BaseRepository[Group]):
         )
         return list(result.scalars().all())
 
-    async def count_by_status(self, status: GroupStatus) -> int:
-        result = await self._session.execute(
-            select(func.count()).select_from(Group).where(Group.status == status)
-        )
+    async def count_by_status(self, status: GroupStatus, verified_only: bool = False) -> int:
+        query = select(func.count()).select_from(Group).where(Group.status == status)
+        if verified_only:
+            query = query.where(Group.verified_target.is_(True))
+        result = await self._session.execute(query)
         return result.scalar_one()
 
     async def count_write_restricted(self) -> int:
@@ -162,14 +163,16 @@ class GroupRepository(BaseRepository[Group]):
         return result.rowcount
 
     async def get_by_status_paged(
-        self, status: "GroupStatus", limit: int = 15, offset: int = 0
+        self,
+        status: "GroupStatus",
+        limit: int = 15,
+        offset: int = 0,
+        verified_only: bool = False,
     ) -> list[Group]:
         """DB-level paginated fetch for a given status (avoids loading all rows)."""
-        result = await self._session.execute(
-            select(Group)
-            .where(Group.status == status)
-            .order_by(Group.created_at.desc())
-            .limit(limit)
-            .offset(offset)
-        )
+        query = select(Group).where(Group.status == status)
+        if verified_only:
+            query = query.where(Group.verified_target.is_(True))
+        query = query.order_by(Group.created_at.desc()).limit(limit).offset(offset)
+        result = await self._session.execute(query)
         return list(result.scalars().all())

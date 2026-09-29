@@ -99,6 +99,22 @@ class JoinQueueService:
                 exc,
             )
 
+    async def _mark_verified(self, group_id: int) -> None:
+        """Persist that the target passed strict group-only validation."""
+        try:
+            async with AsyncSessionLocal() as session:
+                group_repo = GroupRepository(session)
+                group = await group_repo.get_by_group_id(group_id)
+                if group is not None and not group.verified_target:
+                    group.verified_target = True
+                    await session.commit()
+        except Exception as exc:
+            logger.warning(
+                "Could not persist verified group target group_id=%d: %s",
+                group_id,
+                exc,
+            )
+
     async def enqueue(
         self,
         group_id: int,
@@ -145,6 +161,7 @@ class JoinQueueService:
                 await self._mark_not_group(group_id, link)
             return False
 
+        await self._mark_verified(group_id)
         task = JoinTask(group_id=group_id, link=link, title=title, attempt_number=attempt)
         self._queued_ids.add(group_id)
         await self._queue.put(task)

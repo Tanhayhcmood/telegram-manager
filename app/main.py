@@ -126,6 +126,10 @@ async def _init_db() -> None:
         await conn.execute(text(
             "ALTER TABLE groups ADD COLUMN IF NOT EXISTS can_write BOOLEAN NOT NULL DEFAULT TRUE"
         ))
+        await conn.execute(text(
+            "ALTER TABLE groups "
+            "ADD COLUMN IF NOT EXISTS verified_target BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
         await conn.execute(text("""
             DO $$
             BEGIN

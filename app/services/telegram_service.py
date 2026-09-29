@@ -979,6 +979,7 @@ class TelegramUserService:
                     title=g["title"],
                     username=g.get("username"),
                     members_count=g.get("members_count"),
+                    verified_target=True,
                     status=GroupStatus.JOINED,
                     # A periodic live refresh must not rewrite the original
                     # join time; otherwise "recent groups" changes every

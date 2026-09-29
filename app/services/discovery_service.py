@@ -411,6 +411,7 @@ class DiscoveryService:
 
                 group_id = existing_group.group_id
                 existing_group.status = GroupStatus.PENDING
+                existing_group.verified_target = True
                 existing_group.invite_link = parsed.normalized
                 existing_group.title = title or existing_group.title
                 existing_group.username = username.lower() if username else existing_group.username
@@ -433,6 +434,7 @@ class DiscoveryService:
                     invite_link=parsed.normalized,
                     members_count=members_count,
                     status=GroupStatus.PENDING,
+                    verified_target=True,
                 )
                 record.status = LinkStatus.APPROVED
                 await log_repo.add(

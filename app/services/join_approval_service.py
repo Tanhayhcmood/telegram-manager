@@ -110,6 +110,7 @@ class JoinApprovalWatcher:
                         new_group = Group(
                             group_id=chat_id,
                             title=title,
+                            verified_target=True,
                             status=GroupStatus.JOINED,
                             join_date=datetime.now(timezone.utc),
                         )

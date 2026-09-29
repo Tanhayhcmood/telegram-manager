@@ -268,10 +268,13 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
         # DB-level count — no full table scan
-        total = await repo.count_by_status(GroupStatus.PENDING)
+        total = await repo.count_by_status(GroupStatus.PENDING, verified_only=True)
         # DB-level paged fetch — only PAGE_SIZE rows loaded
         groups = await repo.get_by_status_paged(
-            GroupStatus.PENDING, limit=PAGE_SIZE, offset=page * PAGE_SIZE
+            GroupStatus.PENDING,
+            limit=PAGE_SIZE,
+            offset=page * PAGE_SIZE,
+            verified_only=True,
         )
         rows = [(g.group_id, g.title, g.invite_link, g.username) for g in groups]
 
@@ -284,22 +287,13 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
         )
         return
 
-    if not rows:
-        await callback.message.edit_text(  # type: ignore[union-attr]
-            "🛡 <b>مورد قابل تأیید در این صفحه وجود ندارد.</b>\n\n"
-            "فقط گروه و سوپرگروه در این بخش نمایش داده می‌شوند.",
-            parse_mode="HTML",
-            reply_markup=_back_btn(),
-        )
-        return
-
     total_pages = max(1, -(-total // PAGE_SIZE))
     page = min(max(page, 0), total_pages - 1)
     lines = [
         "🔎 <b>مرکز بررسی گروه‌ها</b>",
         "━━━━━━━━━━━━━━━━━━",
         f"📦 صف فعلی: <b>{total}</b> مورد  •  📄 صفحه <b>{page + 1}</b> از <b>{total_pages}</b>",
-        "🛡 فقط <b>گروه</b> و <b>سوپرگروه</b> قابل تأیید و عضویت هستند.",
+        "🛡 فقط <b>گروه</b> و <b>سوپرگروه</b> تأییدشده نمایش داده می‌شوند.",
         "ℹ️ نوع هدف هنگام تأیید نهایی دوباره بررسی می‌شود.",
         "━━━━━━━━━━━━━━━━━━",
     ]
@@ -424,6 +418,7 @@ async def cb_approve(callback: CallbackQuery) -> None:
                 "❌ این مورد دیگر در صف بررسی نیست."
             )
             return
+        group.verified_target = True
         group.status = GroupStatus.APPROVED
         await log_repo.add(
             action="group_approved",
@@ -744,6 +739,7 @@ async def handle_admin_link(message: Message) -> None:
                     invite_link=normalized,
                     members_count=members_count,
                     status=GroupStatus.PENDING,
+                    verified_target=True,
                 )
                 await session.commit()
 
