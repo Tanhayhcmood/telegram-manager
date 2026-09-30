@@ -8,9 +8,9 @@ from app.database.connection import Base
 class RuntimeSetting(Base):
     """Singleton row (id=1) holding admin-adjustable runtime settings.
 
-    Currently only the join-queue anti-detection delay range is exposed
-    to admins via the bot UI, but this table is the place to add future
-    live-configurable knobs without needing a redeploy.
+    Currently the exact join-queue delay is exposed to admins via the bot UI,
+    but this table is the place to add future live-configurable knobs without
+    needing a redeploy.
     """
     __tablename__ = "runtime_settings"
 

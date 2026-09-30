@@ -1,5 +1,5 @@
 """
-Sequential join queue with random jitter and per-day rate-limit.
+Sequential join queue with an exact admin-configured delay and per-day safety controls.
 All discovered group links pass through this queue — never joined in parallel.
 
 Key guarantees:
@@ -13,7 +13,6 @@ Key guarantees:
     re-queued and processed the following day.
 """
 import asyncio
-import random
 from datetime import date, datetime, timezone, timedelta
 from dataclasses import dataclass
 from typing import Any
@@ -387,15 +386,20 @@ class JoinQueueService:
             )
             return
 
-        # ── Anti-detection delay: randomised jitter in [MIN, MAX] seconds ─────
-        # Read live (admin-adjustable) values — a change made mid-queue takes
-        # effect immediately on the next task, no restart needed.
+        # ── Exact admin-configured delay ───────────────────────────────────
+        # Read live values so a panel change affects the next queued task
+        # immediately, without a restart or a randomized range.
         from app.services.runtime_config_service import RuntimeConfigService
         delay_min, delay_max = RuntimeConfigService.get_instance().get_join_delay()
-        delay = random.uniform(delay_min, delay_max)
+        delay = float(delay_min)
+        if delay_min != delay_max:
+            logger.warning(
+                "Non-exact join delay state [%d, %d]s detected; using %ds",
+                delay_min, delay_max, delay_min,
+            )
         logger.info(
             "Waiting %.0fs (%.1f min) before joining group_id=%d (%r)  "
-            "[daily: %d/%d]",
+            "[exact panel delay; daily: %d/%d]",
             delay, delay / 60, task.group_id, task.title,
             self._daily_join_count, settings.MAX_JOINS_PER_DAY,
         )

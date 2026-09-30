@@ -44,12 +44,22 @@ class RuntimeConfigService:
             async with AsyncSessionLocal() as session:
                 repo = RuntimeSettingRepository(session)
                 row = await repo.get_or_create()
+                if row.join_delay_min != row.join_delay_max:
+                    # Convert the old randomized range to its midpoint once.
+                    # This preserves the previous average while making the
+                    # admin panel and the worker use one exact delay.
+                    normalized = max(1, round((row.join_delay_min + row.join_delay_max) / 2))
+                    logger.warning(
+                        "Normalizing legacy join delay range [%d, %d]s to exact %ds",
+                        row.join_delay_min, row.join_delay_max, normalized,
+                    )
+                    row = await repo.update_join_delay(normalized, normalized)
             self._join_delay_min = row.join_delay_min
             self._join_delay_max = row.join_delay_max
             self._loaded = True
             logger.info(
-                "Runtime config loaded: join_delay=[%d, %d]s",
-                self._join_delay_min, self._join_delay_max,
+                "Runtime config loaded: exact join_delay=%ds",
+                self._join_delay_min,
             )
         except Exception as exc:
             logger.error(
@@ -58,7 +68,7 @@ class RuntimeConfigService:
             )
 
     def get_join_delay(self) -> tuple[int, int]:
-        """Return (min_seconds, max_seconds) for the join-queue anti-detection jitter."""
+        """Return the exact configured delay as (seconds, seconds)."""
         return self._join_delay_min, self._join_delay_max
 
     async def set_join_delay(self, delay_min: int, delay_max: int) -> None:
@@ -69,8 +79,8 @@ class RuntimeConfigService:
         """
         if delay_min <= 0 or delay_max <= 0:
             raise ValueError("مقادیر باید بزرگ‌تر از صفر باشند.")
-        if delay_max < delay_min:
-            raise ValueError("حداکثر باید بزرگ‌تر یا مساوی حداقل باشد.")
+        if delay_max != delay_min:
+            raise ValueError("فاصله عضویت باید یک مقدار دقیق باشد؛ حداقل و حداکثر باید برابر باشند.")
 
         async with self._lock:
             async with AsyncSessionLocal() as session:

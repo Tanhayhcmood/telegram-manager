@@ -66,9 +66,10 @@ class Settings(BaseSettings):
     # ── Daily join limit ───────────────────────────────────────────────────────
     MAX_JOINS_PER_DAY: int = 30
 
-    # ── Join queue anti-detection delays ───────────────────────────────────────
+    # ── Exact join queue delay defaults (seconds) ───────────────────────────
+    # The Telegram admin panel overrides this value live and stores min=max.
     JOIN_DELAY_MIN: int = 3600
-    JOIN_DELAY_MAX: int = 4500
+    JOIN_DELAY_MAX: int = 3600
 
     # ── Auto-retry for failed joins ────────────────────────────────────────────
     RETRY_FAILED_JOINS: bool = True

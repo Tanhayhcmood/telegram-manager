@@ -20,9 +20,11 @@ class JoinDelayStates(StatesGroup):
 
 
 def _current_delay_min() -> int:
-    """Live (admin-adjustable) join delay midpoint in whole minutes, for display."""
-    lo, hi = RuntimeConfigService.get_instance().get_join_delay()
-    return round(((lo + hi) / 2) / 60)
+    """Return the exact admin-configured join delay in whole minutes."""
+    delay_min, delay_max = RuntimeConfigService.get_instance().get_join_delay()
+    # RuntimeConfigService normalizes legacy ranges, but keep the display
+    # deterministic if an old process has not reloaded yet.
+    return round((delay_min if delay_min == delay_max else (delay_min + delay_max) / 2) / 60)
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -344,13 +346,19 @@ def _join_delay_keyboard() -> InlineKeyboardMarkup:
 
 
 def _join_delay_text() -> str:
-    lo, hi = RuntimeConfigService.get_instance().get_join_delay()
-    lo_min, hi_min = lo / 60, hi / 60
+    delay_min, delay_max = RuntimeConfigService.get_instance().get_join_delay()
+    if delay_min == delay_max and delay_min % 60 == 0:
+        current = f"{delay_min // 60} دقیقه"
+    elif delay_min == delay_max:
+        current = f"{delay_min / 60:.2f} دقیقه"
+    else:
+        # This is only a legacy display; startup normalizes it to one exact value.
+        current = f"{delay_min / 60:.2f} تا {delay_max / 60:.2f} دقیقه (قدیمی)"
     return (
         "⚙️ <b>تنظیم فاصله عضویت در گروه‌ها</b>\n\n"
-        f"فاصله فعلی: <b>{lo_min:.0f} تا {hi_min:.0f} دقیقه</b> (تصادفی بین این دو، برای جلوگیری از شناسایی توسط تلگرام)\n\n"
-        "یک مقدار میانگین از گزینه‌های زیر انتخاب کنید (بازه ۲۵٪± حول آن به‌صورت خودکار تنظیم می‌شود)، "
-        "یا مقدار دلخواه خود را به دقیقه وارد کنید.\n\n"
+        f"فاصله فعلی: <b>{current}</b>\n\n"
+        "یک مقدار دقیق به دقیقه انتخاب کنید یا مقدار دلخواه خود را وارد کنید. "
+        "عضویت بعدی دقیقاً پس از همین فاصله زمانی انجام می‌شود.\n\n"
         "⚡️ تغییر بلافاصله و بدون نیاز به ری‌استارت اعمال می‌شود."
     )
 
@@ -371,13 +379,11 @@ async def cb_join_delay_menu(callback: CallbackQuery, state: FSMContext) -> None
     )
 
 
-async def _apply_join_delay_minutes(average_minutes: float) -> tuple[int, int]:
-    """Apply a new average delay (in minutes) with ±25% jitter range, return (min_s, max_s)."""
-    avg_seconds = average_minutes * 60
-    delay_min = max(1, round(avg_seconds * 0.75))
-    delay_max = max(delay_min + 1, round(avg_seconds * 1.25))
-    await RuntimeConfigService.get_instance().set_join_delay(delay_min, delay_max)
-    return delay_min, delay_max
+async def _apply_join_delay_minutes(minutes: int) -> int:
+    """Persist one exact delay in seconds and return it."""
+    delay_seconds = minutes * 60
+    await RuntimeConfigService.get_instance().set_join_delay(delay_seconds, delay_seconds)
+    return delay_seconds
 
 
 @router.callback_query(F.data.startswith("jd_preset:"))
@@ -425,25 +431,25 @@ async def cancel_join_delay_custom(message: Message, state: FSMContext) -> None:
 async def receive_join_delay_custom(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     try:
-        minutes = float(text)
-        if minutes <= 0:
+        minutes = int(text)
+        if minutes <= 0 or str(minutes) != text:
             raise ValueError
     except ValueError:
-        await message.answer("❌ لطفاً یک عدد معتبر و بزرگ‌تر از صفر به دقیقه ارسال کنید.")
+        await message.answer("❌ لطفاً یک عدد صحیح و بزرگ‌تر از صفر به دقیقه ارسال کنید.")
         return
 
     await state.clear()
     try:
-        delay_min, delay_max = await _apply_join_delay_minutes(minutes)
+        delay_seconds = await _apply_join_delay_minutes(minutes)
     except ValueError as exc:
         await message.answer(f"❌ {exc}")
         return
 
     actor = message.from_user.id if message.from_user else "?"
-    logger.info("Join delay changed by admin %s → %.1f min average (custom)", actor, minutes)
+    logger.info("Join delay changed by admin %s → %d exact minutes (custom)", actor, minutes)
     await message.answer(
         f"✅ فاصله عضویت به‌صورت لحظه‌ای تغییر کرد.\n"
-        f"میانگین: <b>{minutes:.0f} دقیقه</b> (بازه: {delay_min // 60}–{delay_max // 60} دقیقه)",
+        f"مقدار دقیق: <b>{delay_seconds // 60} دقیقه</b>",
         parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
