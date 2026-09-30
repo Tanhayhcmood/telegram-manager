@@ -330,6 +330,37 @@ class JoinQueueService:
     # Core join logic
     # ------------------------------------------------------------------
 
+    async def _wait_for_configured_delay(self, task: JoinTask) -> None:
+        """Wait for the exact panel delay; restart the interval on a live change."""
+        from app.services.runtime_config_service import RuntimeConfigService
+
+        config = RuntimeConfigService.get_instance()
+        while True:
+            changed = config.get_join_delay_change_event()
+            changed.clear()
+            delay_min, delay_max = config.get_join_delay()
+            delay = float(delay_min)
+            if delay_min != delay_max:
+                logger.warning(
+                    "Non-exact join delay state [%d, %d]s detected; using %ds",
+                    delay_min, delay_max, delay_min,
+                )
+            logger.info(
+                "Waiting %.0fs (%.1f min) before joining group_id=%d (%r)  "
+                "[exact panel delay; daily: %d/%d]",
+                delay, delay / 60, task.group_id, task.title,
+                self._daily_join_count, settings.MAX_JOINS_PER_DAY,
+            )
+            try:
+                await asyncio.wait_for(changed.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                if not changed.is_set():
+                    return
+            logger.info(
+                "Join delay changed while waiting for group_id=%d; restarting with current panel value",
+                task.group_id,
+            )
+
     async def _process(self, task: JoinTask) -> None:
         if self._tg is None:
             logger.error(
@@ -387,23 +418,9 @@ class JoinQueueService:
             return
 
         # ── Exact admin-configured delay ───────────────────────────────────
-        # Read live values so a panel change affects the next queued task
-        # immediately, without a restart or a randomized range.
-        from app.services.runtime_config_service import RuntimeConfigService
-        delay_min, delay_max = RuntimeConfigService.get_instance().get_join_delay()
-        delay = float(delay_min)
-        if delay_min != delay_max:
-            logger.warning(
-                "Non-exact join delay state [%d, %d]s detected; using %ds",
-                delay_min, delay_max, delay_min,
-            )
-        logger.info(
-            "Waiting %.0fs (%.1f min) before joining group_id=%d (%r)  "
-            "[exact panel delay; daily: %d/%d]",
-            delay, delay / 60, task.group_id, task.title,
-            self._daily_join_count, settings.MAX_JOINS_PER_DAY,
-        )
-        await asyncio.sleep(delay)
+        # A change in the Telegram panel wakes this wait and starts the newly
+        # selected exact interval immediately.
+        await self._wait_for_configured_delay(task)
 
         # ── Re-check limit after sleeping (another task may have filled quota) ─
         if self._daily_limit_reached():

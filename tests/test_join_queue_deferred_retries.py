@@ -199,6 +199,47 @@ class JoinQueueDeferredRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("محدودیت موقت تلگرام", RecordingNotificationService.messages[0])
         self.assertIn("زمان تقریبی ادامهٔ صف", RecordingNotificationService.messages[0])
 
+    async def test_live_delay_change_restarts_the_current_wait(self) -> None:
+        changed = asyncio.Event()
+
+        class FakeRuntimeConfig:
+            delay = 3600
+
+            @classmethod
+            def get_instance(cls) -> "FakeRuntimeConfig":
+                return cls()
+
+            @classmethod
+            def get_join_delay(cls) -> tuple[int, int]:
+                return cls.delay, cls.delay
+
+            @classmethod
+            def get_join_delay_change_event(cls) -> asyncio.Event:
+                return changed
+
+        services_package = _stub_module("app.services")
+        services_package.__path__ = []
+        runtime_module = _stub_module(
+            "app.services.runtime_config_service",
+            RuntimeConfigService=FakeRuntimeConfig,
+        )
+        task = self.module.JoinTask(55, "https://t.me/example", "example")
+
+        with patch.dict(
+            sys.modules,
+            {
+                "app.services": services_package,
+                "app.services.runtime_config_service": runtime_module,
+            },
+        ):
+            waiting = asyncio.create_task(self.queue._wait_for_configured_delay(task))
+            await asyncio.sleep(0)
+            FakeRuntimeConfig.delay = 0.04
+            changed.set()
+            await asyncio.sleep(0.01)
+            self.assertFalse(waiting.done(), "the newly selected 40ms interval must start after the edit")
+            await asyncio.wait_for(waiting, timeout=0.5)
+
     async def test_positive_daily_limit_is_enforced(self) -> None:
         self.module.settings.MAX_JOINS_PER_DAY = 2
         self.queue._daily_join_count = 2

@@ -25,6 +25,8 @@ class RuntimeConfigService:
         # In-memory cache — starts from env defaults until load() runs.
         self._join_delay_min: int = settings.JOIN_DELAY_MIN
         self._join_delay_max: int = settings.JOIN_DELAY_MAX
+        # Wakes an in-progress queue delay when an admin changes the exact value.
+        self._join_delay_changed = asyncio.Event()
         self._loaded = False
         # Serializes concurrent set_join_delay() calls so a DB write followed
         # by the in-memory cache update always happens as one atomic step —
@@ -71,6 +73,10 @@ class RuntimeConfigService:
         """Return the exact configured delay as (seconds, seconds)."""
         return self._join_delay_min, self._join_delay_max
 
+    def get_join_delay_change_event(self) -> asyncio.Event:
+        """Return the event that wakes a current queue wait after a real change."""
+        return self._join_delay_changed
+
     async def set_join_delay(self, delay_min: int, delay_max: int) -> None:
         """Persist a new join-delay range and update the in-memory cache immediately.
 
@@ -89,8 +95,13 @@ class RuntimeConfigService:
 
             # Update the cache from the row the DB actually persisted (not the
             # raw input) so cache and DB can never diverge even under overlap.
+            changed = (self._join_delay_min, self._join_delay_max) != (
+                row.join_delay_min, row.join_delay_max
+            )
             self._join_delay_min = row.join_delay_min
             self._join_delay_max = row.join_delay_max
+            if changed:
+                self._join_delay_changed.set()
             logger.info(
                 "Join delay updated by admin: [%d, %d]s (live — takes effect on the next queued join)",
                 self._join_delay_min, self._join_delay_max,
