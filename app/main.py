@@ -256,12 +256,14 @@ async def main() -> None:
 
     scheduler = SchedulerService.get_instance()
     scheduler.set_bot(bot)
+    discovery_service: DiscoveryService | None = None
 
     async def _start_client_safe() -> None:
+        nonlocal discovery_service
         try:
             await tg.start()
-            discovery = DiscoveryService(tg)
-            tg.on_new_message(discovery.process_message)
+            discovery_service = DiscoveryService(tg)
+            tg.on_new_message(discovery_service.process_message)
             tg.on_new_message(forced_subscribe.process_message)
             asyncio.create_task(dm_polling_loop(tg.client))  # AI DM polling
             await approval_watcher.start()   # watch for approved join requests
@@ -369,6 +371,8 @@ async def main() -> None:
     scheduler.stop()
     await health.stop()
     await jq.stop()
+    if discovery_service is not None:
+        await discovery_service.stop()
     await tg.stop()
     await bot.session.close()
     await engine.dispose()

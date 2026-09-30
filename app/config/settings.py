@@ -55,6 +55,11 @@ class Settings(BaseSettings):
 
     # ── Discovery ──────────────────────────────────────────────────────────────
     DISCOVERY_KEYWORDS: str = ""
+    # Discovery is intentionally decoupled from the join queue. These limits
+    # keep link collection responsive without issuing Telegram joins in parallel.
+    DISCOVERY_CONCURRENCY: int = 8
+    DISCOVERY_BIO_CACHE_TTL_SECONDS: int = 900
+    DISCOVERY_BIO_CACHE_LIMIT: int = 2048
 
     # ── Daily join limit ───────────────────────────────────────────────────────
     MAX_JOINS_PER_DAY: int = 30

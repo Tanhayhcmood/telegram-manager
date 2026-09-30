@@ -86,6 +86,13 @@ ADMIN_IDS             ← شناسه عددی تلگرام شما
 # کشف فقط پیام‌های حاوی این کلمات (خالی = همه)
 DISCOVERY_KEYWORDS=پیج,گروه,join
 
+# تعداد اعتبارسنجی همزمان لینک‌ها؛ عضویت‌ها همچنان ترتیبی و ایمن هستند
+DISCOVERY_CONCURRENCY=8
+
+# کش بیوگرافی برای کشف لینک‌های موجود در bio
+DISCOVERY_BIO_CACHE_TTL_SECONDS=900
+DISCOVERY_BIO_CACHE_LIMIT=2048
+
 # حداکثر عضویت در روز
 MAX_JOINS_PER_DAY=50
 
