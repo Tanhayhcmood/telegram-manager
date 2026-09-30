@@ -46,11 +46,41 @@ class DiscoveryService:
         self._bio_inflight: dict[int, asyncio.Task[str]] = {}
         self._stopping = False
 
+    async def start(self) -> None:
+        """Resume links left in validation after a crash or deploy."""
+        if self._stopping:
+            return
+        self._spawn(self._resume_pending_links())
+
     async def process_message(self, event: Any) -> None:
         """Schedule processing and return without blocking Telethon updates."""
         if self._stopping:
             return
         self._spawn(self._process_message(event))
+
+    async def _resume_pending_links(self) -> None:
+        """Recover persisted candidates that never reached group registration."""
+        try:
+            async with AsyncSessionLocal() as session:
+                pending = await DiscoveredLinkRepository(session).get_pending(
+                    limit=max(1, settings.DISCOVERY_PENDING_RETRY_LIMIT)
+                )
+
+            recovered = 0
+            for record in pending:
+                link = LinkValidator.normalize(record.link)
+                if not link or link in self._inflight_links:
+                    continue
+                self._inflight_links.add(link)
+                source = record.source or "startup-recovery"
+                self._spawn(self._process_candidate(link, source))
+                recovered += 1
+            if recovered:
+                logger.info("Recovered %d pending discovered link(s) after startup", recovered)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Could not recover pending discovered links: %s", exc, exc_info=True)
 
     async def _process_message(self, event: Any) -> None:
         try:
@@ -131,7 +161,9 @@ class DiscoveryService:
     async def _process_candidate(self, link: str, source: str) -> None:
         try:
             async with self._candidate_semaphore:
-                await self._register_link(link, source)
+                should_validate = await self._register_link(link, source)
+                if not should_validate:
+                    return
                 await self._validate_and_enqueue(link)
         except asyncio.CancelledError:
             raise
@@ -198,13 +230,15 @@ class DiscoveryService:
         except Exception as exc:
             logger.debug("Could not track user: %s", exc)
 
-    async def _register_link(self, link: str, source: str) -> None:
+    async def _register_link(self, link: str, source: str) -> bool:
         async with AsyncSessionLocal() as session:
             link_repo = DiscoveredLinkRepository(session)
             log_repo = LogRepository(session)
             record, created = await link_repo.register(link, source)
             if not created:
-                return
+                # Already accepted/rejected/joined links do not need another
+                # Telegram lookup. A PENDING row is recoverable work.
+                return record.status == LinkStatus.PENDING
             logger.info("Discovered new link: %s from %s", link, source)
             await log_repo.add(
                 action="link_discovered",
@@ -213,11 +247,37 @@ class DiscoveryService:
                 details=f"source={source}",
             )
             await session.commit()
+            return True
+
+    async def _resolve_entity_with_retry(self, link: str) -> Any | None:
+        """Retry transient lookup misses before permanently rejecting a link."""
+        attempts = max(0, settings.DISCOVERY_RESOLVE_RETRIES)
+        for attempt in range(attempts + 1):
+            entity = await self._tg.resolve_entity(link)
+            if entity is not None:
+                return entity
+            if attempt < attempts:
+                delay = min(8.0, 1.5 * (attempt + 1))
+                logger.debug(
+                    "Entity lookup returned no result for %s; retrying in %.1fs (%d/%d)",
+                    link,
+                    delay,
+                    attempt + 1,
+                    attempts,
+                )
+                await asyncio.sleep(delay)
+        return None
 
     async def _validate_and_enqueue(self, link: str) -> None:
         # Telegram I/O stays outside the DB session so a slow lookup cannot
         # hold a database connection open.
-        entity = await self._tg.resolve_entity(link)
+        try:
+            entity = await self._resolve_entity_with_retry(link)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Entity lookup failed for %s: %s", link, exc)
+            entity = None
 
         async with AsyncSessionLocal() as session:
             link_repo = DiscoveredLinkRepository(session)

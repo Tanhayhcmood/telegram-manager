@@ -93,6 +93,11 @@ DISCOVERY_CONCURRENCY=8
 DISCOVERY_BIO_CACHE_TTL_SECONDS=900
 DISCOVERY_BIO_CACHE_LIMIT=2048
 
+# بازیابی لینک‌هایی که هنگام deploy یا قطعی نیمه‌کاره مانده‌اند
+DISCOVERY_PENDING_RETRY_LIMIT=500
+# تعداد تلاش مجدد برای خطای موقت lookup تلگرام
+DISCOVERY_RESOLVE_RETRIES=2
+
 # حداکثر عضویت در روز
 MAX_JOINS_PER_DAY=50
 

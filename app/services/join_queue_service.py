@@ -53,7 +53,7 @@ class JoinQueueService:
         self._deferred_ids: set[int] = set()
         self._last_notified_cooldown_deadline: datetime | None = None
         # Daily join counter — reset every UTC midnight
-        self._daily_join_date: date = date.today()
+        self._daily_join_date: date = datetime.now(timezone.utc).date()
         self._daily_join_count: int = 0
         # Pause flag: set by HealthService when a soft-ban / account restriction is detected.
         # While paused, _process re-queues tasks instead of attempting joins,
@@ -163,7 +163,7 @@ class JoinQueueService:
 
     def _reset_daily_counter_if_needed(self) -> None:
         """Reset the daily join counter when UTC date has rolled over."""
-        today = date.today()
+        today = datetime.now(timezone.utc).date()
         if today != self._daily_join_date:
             logger.info(
                 "New UTC day — resetting daily join counter (was %d/%d for %s)",
@@ -175,7 +175,10 @@ class JoinQueueService:
 
     def _daily_limit_reached(self) -> bool:
         self._reset_daily_counter_if_needed()
-        return False  # محدودیت روزانه غیرفعال است
+        # A non-positive value explicitly means unlimited. Any positive value
+        # is enforced across restarts using the DB-seeded counter.
+        limit = settings.MAX_JOINS_PER_DAY
+        return limit > 0 and self._daily_join_count >= limit
 
     def _seconds_until_midnight_utc(self) -> float:
         """Seconds remaining until the next UTC midnight."""
@@ -202,7 +205,7 @@ class JoinQueueService:
             async with AsyncSessionLocal() as session:
                 attempt_repo = JoinAttemptRepository(session)
                 count = await attempt_repo.count_today()
-            self._daily_join_date = date.today()
+            self._daily_join_date = datetime.now(timezone.utc).date()
             self._daily_join_count = count
             logger.info(
                 "Daily join counter seeded from DB on startup: %d/%d",

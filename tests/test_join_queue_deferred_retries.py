@@ -198,3 +198,13 @@ class JoinQueueDeferredRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(RecordingNotificationService.messages), 1)
         self.assertIn("محدودیت موقت تلگرام", RecordingNotificationService.messages[0])
         self.assertIn("زمان تقریبی ادامهٔ صف", RecordingNotificationService.messages[0])
+
+    async def test_positive_daily_limit_is_enforced(self) -> None:
+        self.module.settings.MAX_JOINS_PER_DAY = 2
+        self.queue._daily_join_count = 2
+        self.assertTrue(self.queue._daily_limit_reached())
+
+    async def test_zero_daily_limit_means_unlimited(self) -> None:
+        self.module.settings.MAX_JOINS_PER_DAY = 0
+        self.queue._daily_join_count = 999
+        self.assertFalse(self.queue._daily_limit_reached())

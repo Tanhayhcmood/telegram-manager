@@ -264,6 +264,7 @@ async def main() -> None:
             await tg.start()
             discovery_service = DiscoveryService(tg)
             tg.on_new_message(discovery_service.process_message)
+            await discovery_service.start()
             tg.on_new_message(forced_subscribe.process_message)
             asyncio.create_task(dm_polling_loop(tg.client))  # AI DM polling
             await approval_watcher.start()   # watch for approved join requests

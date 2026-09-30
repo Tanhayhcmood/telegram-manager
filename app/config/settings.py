@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     DISCOVERY_CONCURRENCY: int = 8
     DISCOVERY_BIO_CACHE_TTL_SECONDS: int = 900
     DISCOVERY_BIO_CACHE_LIMIT: int = 2048
+    DISCOVERY_PENDING_RETRY_LIMIT: int = 500
+    DISCOVERY_RESOLVE_RETRIES: int = 2
 
     # ── Daily join limit ───────────────────────────────────────────────────────
     MAX_JOINS_PER_DAY: int = 30
