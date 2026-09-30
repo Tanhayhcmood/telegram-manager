@@ -48,6 +48,9 @@ class JoinQueueService:
         self._tg: Any = None
         # Track IDs already in queue to avoid duplicate requeue on reload
         self._queued_ids: set[int] = set()
+        # Track IDs with one outstanding delayed retry. Pending database rows
+        # are reloaded periodically, so delayed tasks must also be deduplicated.
+        self._deferred_ids: set[int] = set()
         # Daily join counter — reset every UTC midnight
         self._daily_join_date: date = date.today()
         self._daily_join_count: int = 0
@@ -67,8 +70,11 @@ class JoinQueueService:
         self._tg = tg
 
     async def enqueue(self, group_id: int, link: str, title: str | None, attempt: int = 1) -> None:
-        if group_id in self._queued_ids:
-            logger.debug("Group %d already in queue — skipping duplicate enqueue", group_id)
+        if group_id in self._queued_ids or group_id in self._deferred_ids:
+            logger.debug(
+                "Group %d already queued or deferred — skipping duplicate enqueue",
+                group_id,
+            )
             return
         task = JoinTask(group_id=group_id, link=link, title=title, attempt_number=attempt)
         self._queued_ids.add(group_id)
@@ -211,7 +217,7 @@ class JoinQueueService:
     async def _reload_pending_from_db(self) -> None:
         """Load all PENDING and APPROVED groups from DB into the in-memory queue.
 
-        Safe to call repeatedly — uses _queued_ids to skip duplicates.
+        Safe to call repeatedly — queued and deferred IDs are skipped.
         Groups with no invite_link are skipped (cannot join without a link).
 
         APPROVED groups are reloaded too: they represent groups where the bot admin
@@ -248,7 +254,10 @@ class JoinQueueService:
                         group.group_id, group.status.value,
                     )
                     continue
-                if group.group_id in self._queued_ids:
+                if (
+                    group.group_id in self._queued_ids
+                    or group.group_id in self._deferred_ids
+                ):
                     continue
                 task = JoinTask(
                     group_id=group.group_id,
@@ -346,8 +355,9 @@ class JoinQueueService:
                 "Cannot join group_id=%d (%r): %s — re-queuing in %.0fs",
                 task.group_id, task.title, reason, retry_delay,
             )
-            asyncio.create_task(
-                self._requeue_after_delay(task, retry_delay),
+            self._schedule_requeue(
+                task,
+                retry_delay,
                 name=f"restriction-requeue-{task.group_id}",
             )
             return
@@ -366,8 +376,9 @@ class JoinQueueService:
             # Notify admins once per limit-hit (not once per queued task)
             await self._notify_daily_limit(task, wait_secs)
             # Re-enqueue after midnight
-            asyncio.create_task(
-                self._requeue_after_delay(task, wait_secs),
+            self._schedule_requeue(
+                task,
+                wait_secs,
                 name=f"daily-limit-requeue-{task.group_id}",
             )
             return
@@ -393,8 +404,9 @@ class JoinQueueService:
                 "Daily join limit reached after delay — re-queueing group_id=%d for midnight",
                 task.group_id,
             )
-            asyncio.create_task(
-                self._requeue_after_delay(task, wait_secs),
+            self._schedule_requeue(
+                task,
+                wait_secs,
                 name=f"daily-limit-requeue-post-sleep-{task.group_id}",
             )
             return
@@ -413,8 +425,9 @@ class JoinQueueService:
                 "Post-sleep restriction for group_id=%d (%r): %s — re-queuing in %.0fs",
                 task.group_id, task.title, reason, retry_delay,
             )
-            asyncio.create_task(
-                self._requeue_after_delay(task, retry_delay),
+            self._schedule_requeue(
+                task,
+                retry_delay,
                 name=f"post-sleep-restriction-requeue-{task.group_id}",
             )
             return
@@ -434,8 +447,12 @@ class JoinQueueService:
                 task.group_id, task.title, wait_secs, wait_secs / 3600,
             )
             from app.services.runtime_config_service import RuntimeConfigService
+            cooldown_deadline = datetime.now(timezone.utc) + timedelta(seconds=wait_secs)
             try:
-                await RuntimeConfigService.get_instance().extend_join_not_before_at(wait_secs)
+                cooldown_deadline = (
+                    await RuntimeConfigService.get_instance()
+                    .extend_join_not_before_at(wait_secs)
+                )
             except Exception:
                 # Keep this process paused even if the database write fails.
                 # The failure is loud because persistence is required to keep
@@ -446,9 +463,21 @@ class JoinQueueService:
                     exc_info=True,
                 )
                 self.pause(wait_secs)
-            asyncio.create_task(
-                self._requeue_after_delay(task, wait_secs),
+            if cooldown_deadline.tzinfo is None:
+                cooldown_deadline = cooldown_deadline.replace(tzinfo=timezone.utc)
+            remaining = max(
+                1.0,
+                (cooldown_deadline - datetime.now(timezone.utc)).total_seconds(),
+            )
+            self._schedule_requeue(
+                task,
+                remaining,
                 name=f"flood-requeue-{task.group_id}",
+            )
+            await self._notify_telegram_flood_wait(
+                task,
+                wait_secs,
+                cooldown_deadline,
             )
             # Keep DB status as PENDING — group is not failed, just rate-limited
             return
@@ -474,8 +503,9 @@ class JoinQueueService:
                     "Could not persist PeerFlood cooldown",
                     exc_info=True,
                 )
-            asyncio.create_task(
-                self._requeue_after_delay(task, pause_secs + 120),
+            self._schedule_requeue(
+                task,
+                pause_secs + 120,
                 name=f"peer-flood-requeue-{task.group_id}",
             )
             try:
@@ -606,8 +636,9 @@ class JoinQueueService:
                 task.group_id,
                 exc_info=True,
             )
-            asyncio.create_task(
-                self._requeue_after_delay(task, 300),
+            self._schedule_requeue(
+                task,
+                300,
                 name=f"cooldown-check-requeue-{task.group_id}",
             )
             return True
@@ -627,15 +658,44 @@ class JoinQueueService:
             task.group_id,
             remaining,
         )
-        asyncio.create_task(
-            self._requeue_after_delay(task, remaining),
+        self._schedule_requeue(
+            task,
+            remaining,
             name=f"persisted-cooldown-requeue-{task.group_id}",
+        )
+        return True
+
+    def _schedule_requeue(self, task: JoinTask, delay: float, name: str) -> bool:
+        """Schedule at most one delayed retry for each group ID."""
+        if task.group_id in self._deferred_ids:
+            logger.debug(
+                "Group %d already has a delayed retry — skipping duplicate",
+                task.group_id,
+            )
+            return False
+
+        self._deferred_ids.add(task.group_id)
+        try:
+            delayed_task = asyncio.create_task(
+                self._requeue_after_delay(task, delay),
+                name=name,
+            )
+        except RuntimeError:
+            self._deferred_ids.discard(task.group_id)
+            raise
+        delayed_task.add_done_callback(
+            lambda _completed, group_id=task.group_id: self._deferred_ids.discard(group_id)
         )
         return True
 
     async def _requeue_after_delay(self, task: JoinTask, delay: float) -> None:
         """Sleep delay seconds then re-enqueue the task."""
-        await asyncio.sleep(delay)
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            self._deferred_ids.discard(task.group_id)
+            raise
+        self._deferred_ids.discard(task.group_id)
         logger.info(
             "Re-enqueuing group_id=%d (%r) after %.0f-second delay",
             task.group_id, task.title, delay,
@@ -646,6 +706,32 @@ class JoinQueueService:
             title=task.title,
             attempt=task.attempt_number,
         )
+
+    async def _notify_telegram_flood_wait(
+        self,
+        task: JoinTask,
+        wait_secs: int,
+        deadline: datetime,
+    ) -> None:
+        """Tell admins that Telegram imposed a cooldown and when retries may resume."""
+        try:
+            from app.services.notification_service import NotificationService
+
+            hours = max(
+                0.0,
+                (deadline - datetime.now(timezone.utc)).total_seconds() / 3600,
+            )
+            deadline_utc = deadline.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            await NotificationService.get_instance().notify_info(
+                "<b>محدودیت موقت تلگرام</b>\n\n"
+                f"تلگرام انتظار {wait_secs / 3600:.1f} ساعت را الزامی کرده است.\n"
+                f"زمان تقریبی ادامهٔ صف: <code>{deadline_utc}</code>\n"
+                f"زمان باقی‌مانده: <b>{hours:.1f} ساعت</b>\n"
+                f"گروه <code>{task.group_id}</code> و بقیهٔ گروه‌ها در انتظار می‌مانند؛ "
+                "محدودیت دور زده نمی‌شود."
+            )
+        except Exception as exc:
+            logger.warning("Could not notify admins about Telegram FloodWait: %s", exc)
 
     async def _notify_daily_limit(self, task: JoinTask, wait_secs: float) -> None:
         """Notify admins that the daily join limit has been reached."""
