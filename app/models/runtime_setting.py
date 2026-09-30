@@ -17,6 +17,12 @@ class RuntimeSetting(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     join_delay_min: Mapped[int] = mapped_column(Integer, nullable=False)
     join_delay_max: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Persistent global cooldown. It survives a process restart so a Telegram
+    # FloodWait cannot be bypassed by restarting the worker.
+    join_not_before_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

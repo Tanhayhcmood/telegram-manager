@@ -123,7 +123,11 @@ async def _init_db() -> None:
         await conn.execute(text(
             "ALTER TABLE groups ADD COLUMN IF NOT EXISTS can_write BOOLEAN NOT NULL DEFAULT TRUE"
         ))
-    logger.info("Additive column migrations ensured (can_write)")
+        await conn.execute(text(
+            "ALTER TABLE runtime_settings "
+            "ADD COLUMN IF NOT EXISTS join_not_before_at TIMESTAMPTZ"
+        ))
+    logger.info("Additive column migrations ensured (can_write, join_not_before_at)")
 
 
 async def _build_storage():

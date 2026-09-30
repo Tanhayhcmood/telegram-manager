@@ -1,4 +1,6 @@
-from sqlalchemy import select
+from datetime import datetime
+
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,6 +49,31 @@ class RuntimeSettingRepository(BaseRepository[RuntimeSetting]):
         ).on_conflict_do_update(
             index_elements=["id"],
             set_={"join_delay_min": delay_min, "join_delay_max": delay_max},
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+        result = await self._session.execute(
+            select(RuntimeSetting).where(RuntimeSetting.id == SINGLETON_ID)
+        )
+        return result.scalar_one()
+
+    async def get_join_not_before_at(self) -> datetime | None:
+        row = await self.get_or_create()
+        return row.join_not_before_at
+
+    async def extend_join_not_before_at(self, deadline: datetime) -> RuntimeSetting:
+        """Atomically extend the global join cooldown without shortening it."""
+        await self.get_or_create()
+        stmt = (
+            update(RuntimeSetting)
+            .where(RuntimeSetting.id == SINGLETON_ID)
+            .values(
+                join_not_before_at=func.greatest(
+                    func.coalesce(RuntimeSetting.join_not_before_at, deadline),
+                    deadline,
+                )
+            )
         )
         await self._session.execute(stmt)
         await self._session.commit()

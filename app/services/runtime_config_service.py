@@ -8,6 +8,7 @@ kept in an in-memory cache on this singleton so every reader in the same
 process sees the new value instantly — no restart, no polling delay.
 """
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from app.config import settings
 from app.database.connection import AsyncSessionLocal
@@ -84,3 +85,20 @@ class RuntimeConfigService:
                 "Join delay updated by admin: [%d, %d]s (live — takes effect on the next queued join)",
                 self._join_delay_min, self._join_delay_max,
             )
+
+    async def get_join_not_before_at(self) -> datetime | None:
+        async with AsyncSessionLocal() as session:
+            repo = RuntimeSettingRepository(session)
+            return await repo.get_join_not_before_at()
+
+    async def extend_join_not_before_at(self, seconds: float) -> datetime:
+        """Persist a global join cooldown, only extending any existing deadline."""
+        if seconds <= 0:
+            raise ValueError("Cooldown must be greater than zero.")
+
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        async with self._lock:
+            async with AsyncSessionLocal() as session:
+                repo = RuntimeSettingRepository(session)
+                row = await repo.extend_join_not_before_at(deadline)
+                return row.join_not_before_at or deadline

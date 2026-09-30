@@ -70,9 +70,23 @@ class JoinApprovalWatcher:
             if event_user_id != self._me_id:
                 return
 
-            chat_id: int = event.chat_id
+            # `event.chat_id` is Telethon's marked peer ID (for example,
+            # -1001234567890 for a channel), while Group.group_id is stored
+            # from `entity.id` as the positive Telegram ID. Match using the
+            # entity's canonical ID so approvals update the original row.
+            marked_chat_id = getattr(event, "chat_id", None)
+            chat = await event.get_chat()
+            chat_id = getattr(chat, "id", None)
+            if not isinstance(chat_id, int) or chat_id <= 0:
+                logger.warning(
+                    "JoinApprovalWatcher: could not resolve canonical group ID; "
+                    "skipping approval event (marked_chat_id=%s)",
+                    marked_chat_id,
+                )
+                return
+
             logger.info(
-                "JoinApprovalWatcher: account was approved/added to chat_id=%d", chat_id
+                "JoinApprovalWatcher: account was approved/added to group_id=%d", chat_id
             )
 
             async with AsyncSessionLocal() as session:
@@ -80,27 +94,38 @@ class JoinApprovalWatcher:
                 log_repo   = LogRepository(session)
 
                 group = await group_repo.get_by_group_id(chat_id)
+                # Older versions stored event.chat_id directly. If such a
+                # legacy row exists, normalize it instead of creating a second
+                # row for the same Telegram group.
+                if (
+                    group is None
+                    and isinstance(marked_chat_id, int)
+                    and marked_chat_id != chat_id
+                ):
+                    group = await group_repo.get_by_group_id(marked_chat_id)
+                    if group is not None:
+                        group.group_id = chat_id
+                        await session.flush()
+                        logger.info(
+                            "JoinApprovalWatcher: normalized legacy group ID %d → %d",
+                            marked_chat_id,
+                            chat_id,
+                        )
+
                 title = (group.title if group else None) or str(chat_id)
 
-                # ── CRITICAL FIX: Update group status to JOINED ────────────────
-                # Previously this only logged the event but never updated the DB,
-                # leaving APPROVED groups stuck in APPROVED status forever.
-                if group is not None and group.status == GroupStatus.APPROVED:
+                # The event is authoritative: Telegram has added this account,
+                # regardless of the row's previous status.
+                if group is not None:
                     from datetime import datetime, timezone
+                    previous_status = group.status.value
                     group.status = GroupStatus.JOINED
                     group.join_date = datetime.now(timezone.utc)
                     logger.info(
-                        "JoinApprovalWatcher: group_id=%d (%r) status updated APPROVED → JOINED",
-                        chat_id, title,
-                    )
-                elif group is not None and group.status == GroupStatus.PENDING:
-                    # Can also happen for groups joining without explicit approval step
-                    from datetime import datetime, timezone
-                    group.status = GroupStatus.JOINED
-                    group.join_date = datetime.now(timezone.utc)
-                    logger.info(
-                        "JoinApprovalWatcher: group_id=%d (%r) status updated PENDING → JOINED",
-                        chat_id, title,
+                        "JoinApprovalWatcher: group_id=%d (%r) status updated %s → JOINED",
+                        chat_id,
+                        title,
+                        previous_status,
                     )
                 elif group is None:
                     # Unknown group — create a record so it shows up in the DB

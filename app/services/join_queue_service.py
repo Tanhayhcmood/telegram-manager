@@ -326,6 +326,11 @@ class JoinQueueService:
             )
             return
 
+        # A Telegram FloodWait must survive process restarts. Check the
+        # persisted global deadline before any queued item can call Telegram.
+        if await self._defer_until_persisted_cooldown(task):
+            return
+
         # ── Account restriction / soft-ban guard (pre-sleep check) ──────────────
         # Cache is_paused() once to avoid race around expiry boundary during check.
         # If paused or client offline, re-queue immediately — groups stay PENDING.
@@ -422,11 +427,25 @@ class JoinQueueService:
                 wait_secs = int(join_error.split(":")[1].rstrip("s"))
             except (IndexError, ValueError):
                 wait_secs = 3600  # safe fallback: 1 hour
+            wait_secs = max(1, wait_secs)
 
             logger.warning(
                 "FloodWait for group_id=%d (%r): scheduling retry in %d seconds (~%.1fh)",
                 task.group_id, task.title, wait_secs, wait_secs / 3600,
             )
+            from app.services.runtime_config_service import RuntimeConfigService
+            try:
+                await RuntimeConfigService.get_instance().extend_join_not_before_at(wait_secs)
+            except Exception:
+                # Keep this process paused even if the database write fails.
+                # The failure is loud because persistence is required to keep
+                # the cooldown intact across a subsequent restart.
+                logger.critical(
+                    "Could not persist Telegram FloodWait deadline for %d seconds",
+                    wait_secs,
+                    exc_info=True,
+                )
+                self.pause(wait_secs)
             asyncio.create_task(
                 self._requeue_after_delay(task, wait_secs),
                 name=f"flood-requeue-{task.group_id}",
@@ -445,6 +464,16 @@ class JoinQueueService:
                 task.group_id, task.title, pause_secs,
             )
             self.pause(pause_secs)
+            from app.services.runtime_config_service import RuntimeConfigService
+            try:
+                await RuntimeConfigService.get_instance().extend_join_not_before_at(
+                    pause_secs + 120
+                )
+            except Exception:
+                logger.critical(
+                    "Could not persist PeerFlood cooldown",
+                    exc_info=True,
+                )
             asyncio.create_task(
                 self._requeue_after_delay(task, pause_secs + 120),
                 name=f"peer-flood-requeue-{task.group_id}",
@@ -564,6 +593,45 @@ class JoinQueueService:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _defer_until_persisted_cooldown(self, task: JoinTask) -> bool:
+        """Requeue a task if Telegram's persisted account-wide cooldown is active."""
+        from app.services.runtime_config_service import RuntimeConfigService
+
+        try:
+            deadline = await RuntimeConfigService.get_instance().get_join_not_before_at()
+        except Exception:
+            logger.error(
+                "Cannot verify persisted Telegram cooldown; deferring group_id=%d for 5 minutes",
+                task.group_id,
+                exc_info=True,
+            )
+            asyncio.create_task(
+                self._requeue_after_delay(task, 300),
+                name=f"cooldown-check-requeue-{task.group_id}",
+            )
+            return True
+
+        if deadline is None:
+            return False
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+
+        remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            return False
+
+        logger.warning(
+            "Telegram cooldown active until %s; deferring group_id=%d for %.0f seconds",
+            deadline.isoformat(),
+            task.group_id,
+            remaining,
+        )
+        asyncio.create_task(
+            self._requeue_after_delay(task, remaining),
+            name=f"persisted-cooldown-requeue-{task.group_id}",
+        )
+        return True
 
     async def _requeue_after_delay(self, task: JoinTask, delay: float) -> None:
         """Sleep delay seconds then re-enqueue the task."""
