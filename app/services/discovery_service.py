@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,46 +17,92 @@ logger = get_logger(__name__)
 class DiscoveryService:
     def __init__(self, tg_service: Any) -> None:
         self._tg = tg_service
+        self._bio_cache: dict[int, tuple[float, str]] = {}
+        self._bio_inflight: dict[int, asyncio.Task[str]] = {}
+        self._bio_cache_ttl = 900
+        self._bio_cache_limit = 2048
 
     async def process_message(self, event: Any) -> None:
         try:
-            text = event.message.text or ""
+            message = event.message
+            text = (
+                getattr(message, "raw_text", None)
+                or getattr(message, "message", None)
+                or getattr(message, "text", None)
+                or ""
+            )
             sender_id = event.sender_id
 
             # Track sender as contacted user
             if sender_id and sender_id > 0:
                 await self._track_user(event)
 
-            # Keyword filter — if configured, skip messages without any keyword
             keywords = settings.get_discovery_keywords()
-            if keywords:
-                text_lower = text.lower()
-                if not any(kw in text_lower for kw in keywords):
-                    return
+            text_lower = text.casefold()
+            message_matches_keywords = any(kw in text_lower for kw in keywords)
+            links = LinkValidator.extract_links(
+                text,
+                entities=getattr(message, "entities", None),
+            )
 
-            links = LinkValidator.extract_links(text)
-
-            # Also check sender bio
-            if sender_id:
-                try:
-                    bio = await self._tg.get_user_bio(sender_id)
-                    if bio:
-                        if not keywords or any(kw in bio.lower() for kw in keywords):
-                            links += LinkValidator.extract_links(bio)
-                except Exception:
-                    pass
+            # Direct links should not be discarded just because their message
+            # lacks a keyword. Fetch bios only as a fallback, and cache them so
+            # repeated messages from the same sender do not trigger API calls.
+            if not links and sender_id and (not keywords or message_matches_keywords):
+                bio = await self._get_cached_bio(sender_id)
+                if bio and (
+                    not keywords
+                    or any(keyword in bio.casefold() for keyword in keywords)
+                ):
+                    links = LinkValidator.extract_links(bio)
 
             if not links:
                 return
 
             source = f"message:{event.chat_id}:{event.message.id}"
-            for raw_link in set(links):
-                normalized = LinkValidator.normalize(raw_link)
-                if normalized:
-                    await self._register_link(normalized, source)
+            normalized_links = dict.fromkeys(
+                normalized
+                for raw_link in links
+                if (normalized := LinkValidator.normalize(raw_link))
+            )
+            for normalized in normalized_links:
+                await self._register_link(normalized, source)
 
         except Exception as exc:
             logger.error("Error processing message: %s", exc, exc_info=True)
+
+    async def _get_cached_bio(self, sender_id: int) -> str:
+        now = time.monotonic()
+        cached = self._bio_cache.get(sender_id)
+        if cached and now - cached[0] < self._bio_cache_ttl:
+            return cached[1]
+
+        task = self._bio_inflight.get(sender_id)
+        if task is None:
+            task = asyncio.create_task(self._load_user_bio(sender_id))
+            self._bio_inflight[sender_id] = task
+        return await asyncio.shield(task)
+
+    async def _load_user_bio(self, sender_id: int) -> str:
+        try:
+            try:
+                bio = await self._tg.get_user_bio(sender_id)
+            except Exception as exc:
+                logger.debug("Could not fetch bio for user %d: %s", sender_id, exc)
+                bio = ""
+
+            now = time.monotonic()
+            self._bio_cache[sender_id] = (now, bio)
+            if len(self._bio_cache) > self._bio_cache_limit:
+                expiry = now - self._bio_cache_ttl
+                for user_id, (created_at, _) in list(self._bio_cache.items()):
+                    if created_at < expiry:
+                        self._bio_cache.pop(user_id, None)
+                while len(self._bio_cache) > self._bio_cache_limit:
+                    self._bio_cache.pop(next(iter(self._bio_cache)))
+            return bio
+        finally:
+            self._bio_inflight.pop(sender_id, None)
 
     async def _track_user(self, event: Any) -> None:
         try:
