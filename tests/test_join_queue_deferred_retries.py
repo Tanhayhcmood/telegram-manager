@@ -4,6 +4,7 @@ import logging
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,6 +17,17 @@ def _stub_module(name: str, **attributes: object) -> types.ModuleType:
     module = types.ModuleType(name)
     module.__dict__.update(attributes)
     return module
+
+
+class RecordingNotificationService:
+    messages: list[str] = []
+
+    @classmethod
+    def get_instance(cls) -> "RecordingNotificationService":
+        return cls()
+
+    async def notify_info(self, text: str) -> None:
+        self.messages.append(text)
 
 
 def _load_join_queue_module() -> types.ModuleType:
@@ -75,6 +87,7 @@ class JoinQueueDeferredRetryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.module = _load_join_queue_module()
         self.queue = self.module.JoinQueueService()
+        RecordingNotificationService.messages.clear()
 
     async def test_only_one_delayed_retry_is_scheduled_for_a_group(self) -> None:
         task = self.module.JoinTask(17, "https://t.me/example", "example")
@@ -153,3 +166,35 @@ class JoinQueueDeferredRetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.queue.queue_size(), 0)
         self.assertNotIn(42, self.queue._queued_ids)
+
+    async def test_active_cooldown_notice_is_sent_once_for_each_deadline(self) -> None:
+        app_package = _stub_module("app")
+        app_package.__path__ = [str(APP_PATH.parents[1])]
+        services_package = _stub_module("app.services")
+        services_package.__path__ = []
+        notification_module = _stub_module(
+            "app.services.notification_service",
+            NotificationService=RecordingNotificationService,
+        )
+        deadline = datetime.now(timezone.utc) + timedelta(hours=2)
+
+        with patch.dict(
+            sys.modules,
+            {
+                "app": app_package,
+                "app.services": services_package,
+                "app.services.notification_service": notification_module,
+            },
+        ):
+            await self.queue._notify_telegram_flood_wait(
+                self.module.JoinTask(17, "https://t.me/example", "example"),
+                deadline,
+            )
+            await self.queue._notify_telegram_flood_wait(
+                self.module.JoinTask(18, "https://t.me/example-2", "example-2"),
+                deadline,
+            )
+
+        self.assertEqual(len(RecordingNotificationService.messages), 1)
+        self.assertIn("محدودیت موقت تلگرام", RecordingNotificationService.messages[0])
+        self.assertIn("زمان تقریبی ادامهٔ صف", RecordingNotificationService.messages[0])

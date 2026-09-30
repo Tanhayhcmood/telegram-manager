@@ -51,6 +51,7 @@ class JoinQueueService:
         # Track IDs with one outstanding delayed retry. Pending database rows
         # are reloaded periodically, so delayed tasks must also be deduplicated.
         self._deferred_ids: set[int] = set()
+        self._last_notified_cooldown_deadline: datetime | None = None
         # Daily join counter — reset every UTC midnight
         self._daily_join_date: date = date.today()
         self._daily_join_count: int = 0
@@ -474,11 +475,7 @@ class JoinQueueService:
                 remaining,
                 name=f"flood-requeue-{task.group_id}",
             )
-            await self._notify_telegram_flood_wait(
-                task,
-                wait_secs,
-                cooldown_deadline,
-            )
+            await self._notify_telegram_flood_wait(task, cooldown_deadline)
             # Keep DB status as PENDING — group is not failed, just rate-limited
             return
 
@@ -663,6 +660,7 @@ class JoinQueueService:
             remaining,
             name=f"persisted-cooldown-requeue-{task.group_id}",
         )
+        await self._notify_telegram_flood_wait(task, deadline)
         return True
 
     def _schedule_requeue(self, task: JoinTask, delay: float, name: str) -> bool:
@@ -710,21 +708,25 @@ class JoinQueueService:
     async def _notify_telegram_flood_wait(
         self,
         task: JoinTask,
-        wait_secs: int,
         deadline: datetime,
     ) -> None:
-        """Tell admins that Telegram imposed a cooldown and when retries may resume."""
+        """Tell admins once per cooldown deadline when joins are paused."""
         try:
             from app.services.notification_service import NotificationService
+
+            deadline = deadline.astimezone(timezone.utc)
+            if self._last_notified_cooldown_deadline == deadline:
+                return
+            self._last_notified_cooldown_deadline = deadline
 
             hours = max(
                 0.0,
                 (deadline - datetime.now(timezone.utc)).total_seconds() / 3600,
             )
-            deadline_utc = deadline.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            deadline_utc = deadline.strftime("%Y-%m-%d %H:%M UTC")
             await NotificationService.get_instance().notify_info(
                 "<b>محدودیت موقت تلگرام</b>\n\n"
-                f"تلگرام انتظار {wait_secs / 3600:.1f} ساعت را الزامی کرده است.\n"
+                "تلگرام فعلاً اجازهٔ تلاش مجدد برای عضویت را نمی‌دهد.\n"
                 f"زمان تقریبی ادامهٔ صف: <code>{deadline_utc}</code>\n"
                 f"زمان باقی‌مانده: <b>{hours:.1f} ساعت</b>\n"
                 f"گروه <code>{task.group_id}</code> و بقیهٔ گروه‌ها در انتظار می‌مانند؛ "
