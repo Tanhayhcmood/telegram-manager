@@ -1,16 +1,20 @@
+import html
+
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.database.connection import AsyncSessionLocal
-from app.repositories import GroupRepository
-from app.repositories.join_attempt_repository import JoinAttemptRepository
+from app.models.discovered_link import LinkStatus
 from app.models.group import GroupStatus
+from app.repositories import DiscoveredLinkRepository, GroupRepository
+from app.repositories.join_attempt_repository import JoinAttemptRepository
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 router = Router(name="groups")
 
 PAGE_SIZE = 15
+LINKS_PAGE_SIZE = 8
 
 
 def _back_btn() -> InlineKeyboardMarkup:
@@ -127,6 +131,98 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=action_btns),
+    )
+
+
+# ── All discovered links with pagination ──────────────────────────────────────
+
+_LINK_STATUS_LABELS = {
+    LinkStatus.PENDING: "در حال بررسی",
+    LinkStatus.APPROVED: "در صف عضویت",
+    LinkStatus.REJECTED: "رد شده",
+    LinkStatus.JOINED: "عضو شده",
+    LinkStatus.FAILED: "عضویت ناموفق",
+}
+
+
+def _discovered_links_keyboard(page: int, total: int) -> InlineKeyboardMarkup:
+    buttons: list[list[InlineKeyboardButton]] = []
+    nav = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="◀️ قبلی",
+                callback_data=f"discovered_links_page:{page - 1}",
+            )
+        )
+    if (page + 1) * LINKS_PAGE_SIZE < total:
+        nav.append(
+            InlineKeyboardButton(
+                text="بعدی ▶️",
+                callback_data=f"discovered_links_page:{page + 1}",
+            )
+        )
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.callback_query(F.data == "discovered_links")
+async def cb_discovered_links(callback: CallbackQuery) -> None:
+    await _show_discovered_links_page(callback, 0)
+
+
+@router.callback_query(F.data.startswith("discovered_links_page:"))
+async def cb_discovered_links_page(callback: CallbackQuery) -> None:
+    page = int(callback.data.split(":")[1])  # type: ignore[union-attr]
+    await _show_discovered_links_page(callback, page)
+
+
+async def _show_discovered_links_page(callback: CallbackQuery, page: int) -> None:
+    await callback.answer()
+    async with AsyncSessionLocal() as session:
+        repo = DiscoveredLinkRepository(session)
+        total = await repo.count()
+        max_page = max(0, (total - 1) // LINKS_PAGE_SIZE)
+        page = max(0, min(page, max_page))
+        links = await repo.get_latest(
+            limit=LINKS_PAGE_SIZE,
+            offset=page * LINKS_PAGE_SIZE,
+        )
+
+    if not links:
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            "🔗 هنوز لینکی کشف نشده است.",
+            reply_markup=_discovered_links_keyboard(page, total),
+        )
+        return
+
+    lines = [
+        f"🔗 <b>لینک‌های کشف‌شده</b> ({total:,} مورد — صفحه {page + 1} از {max_page + 1}):\n"
+    ]
+    for item in links:
+        visible_link = item.link if len(item.link) <= 100 else f"{item.link[:97]}…"
+        escaped_link = html.escape(item.link, quote=True)
+        escaped_visible = html.escape(visible_link)
+        status = _LINK_STATUS_LABELS.get(item.status, "نامشخص")
+        lines.append(
+            f'• <a href="{escaped_link}">{escaped_visible}</a>\n'
+            f"  وضعیت: <b>{status}</b>"
+        )
+        if item.discovered_at:
+            lines.append(
+                f"  زمان کشف: {item.discovered_at.strftime('%Y-%m-%d %H:%M')} UTC"
+            )
+        if item.notes:
+            note = item.notes if len(item.notes) <= 120 else f"{item.notes[:117]}…"
+            lines.append(f"  توضیح: {html.escape(note)}")
+
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=_discovered_links_keyboard(page, total),
+        disable_web_page_preview=True,
     )
 
 
