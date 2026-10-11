@@ -29,11 +29,6 @@ services:
         fromDatabase:
           name: tg-manager-db
           property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: tg-manager-redis
-          property: connectionString
 
       # --- App settings ---
       - key: LOG_LEVEL
@@ -72,13 +67,6 @@ services:
         sync: false
       - key: S3_SECRET_KEY
         sync: false
-
-  - type: keyvalue
-    name: tg-manager-redis
-    plan: free
-    region: frankfurt
-    maxmemoryPolicy: noeviction
-    ipAllowList: []
 
 databases:
   - name: tg-manager-db

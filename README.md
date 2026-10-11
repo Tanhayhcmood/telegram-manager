@@ -64,8 +64,9 @@ docker compose up -d
 برای اجرای دائمی یا داده‌های بلندمدت مناسب نیست.
 
 متغیرهای `BOT_TOKEN`, `TELEGRAM_SESSION_STRING`, `ADMIN_IDS` و `WEBHOOK_SECRET`
-باید در Render به‌صورت secret تنظیم شوند. `DATABASE_URL` و `REDIS_URL` از
-منابعی که در `render.yaml` تعریف شده‌اند دریافت می‌شوند.
+باید در Render به‌صورت secret تنظیم شوند. `DATABASE_URL` از PostgreSQL رایگان
+Render می‌آید. این پیکربندی Redis جداگانه نمی‌سازد؛ وضعیت‌های موقت در حافظه‌اند
+و با خواب یا راه‌اندازی مجدد سرویس از بین می‌روند.
 
 ---
 
