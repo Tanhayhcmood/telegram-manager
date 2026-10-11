@@ -28,6 +28,15 @@ class DiscoveredLinkRepository(BaseRepository[DiscoveredLink]):
         )
         return list(result.scalars().all())
 
+    async def get_latest(self, limit: int = 50, offset: int = 0) -> list[DiscoveredLink]:
+        result = await self._session.execute(
+            select(DiscoveredLink)
+            .order_by(DiscoveredLink.discovered_at.desc(), DiscoveredLink.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all())
+
     async def count_by_status(self, status: LinkStatus) -> int:
         result = await self._session.execute(
             select(func.count())

@@ -10,9 +10,10 @@ from typing import Any
 
 from app.config import settings
 from app.database.connection import AsyncSessionLocal
-from app.repositories import GroupRepository, LogRepository
-from app.repositories.join_attempt_repository import JoinAttemptRepository
+from app.models.discovered_link import LinkStatus
 from app.models.group import GroupStatus
+from app.repositories import DiscoveredLinkRepository, GroupRepository, LogRepository
+from app.repositories.join_attempt_repository import JoinAttemptRepository
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -126,9 +127,15 @@ class JoinQueueService:
         async with AsyncSessionLocal() as session:
             group_repo = GroupRepository(session)
             log_repo = LogRepository(session)
+            link_repo = DiscoveredLinkRepository(session)
             attempt_repo = JoinAttemptRepository(session)
 
             group = await group_repo.get_by_group_id(task.group_id)
+            discovered_link = await link_repo.get_by_link(task.link)
+            if discovered_link:
+                discovered_link.status = (
+                    LinkStatus.JOINED if success else LinkStatus.FAILED
+                )
 
             await attempt_repo.add(
                 group_id=task.group_id,
