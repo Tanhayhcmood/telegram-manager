@@ -127,20 +127,50 @@ class DiscoveryService:
             logger.debug("Could not track user: %s", exc)
 
     async def _register_link(self, link: str, source: str) -> None:
+        should_validate = False
+        is_retry = False
         async with AsyncSessionLocal() as session:
             link_repo = DiscoveredLinkRepository(session)
             log_repo = LogRepository(session)
             record, created = await link_repo.register(link, source)
             if not created:
-                return
-            logger.info("Discovered new link: %s from %s", link, source)
-            await log_repo.add(action="link_discovered", result="success", target=link, details=f"source={source}")
-            await session.commit()
+                if (
+                    LinkValidator.is_private_invite(link)
+                    and record.status == LinkStatus.REJECTED
+                    and record.notes == "Could not resolve entity"
+                ):
+                    record.status = LinkStatus.PENDING
+                    record.notes = "Rechecking private invite"
+                    await log_repo.add(
+                        action="private_invite_rechecked",
+                        result="success",
+                        target=link,
+                    )
+                    await session.commit()
+                    should_validate = True
+                    is_retry = True
+                else:
+                    return
+            else:
+                logger.info("Discovered new link: %s from %s", link, source)
+                await log_repo.add(
+                    action="link_discovered",
+                    result="success",
+                    target=link,
+                    details=f"source={source}",
+                )
+                await session.commit()
+                should_validate = True
 
         # Validate and enqueue outside the session so we open a fresh connection
-        await self._validate_and_enqueue(link)
+        if should_validate:
+            await self._validate_and_enqueue(link, private_invite_retry=is_retry)
 
-    async def _validate_and_enqueue(self, link: str) -> None:
+    async def _validate_and_enqueue(
+        self,
+        link: str,
+        private_invite_retry: bool = False,
+    ) -> None:
         # Resolve the entity via Telegram API (may be slow — done outside any DB session)
         entity = await self._tg.resolve_entity(link)
 
@@ -156,7 +186,11 @@ class DiscoveryService:
 
             if entity is None:
                 record.status = LinkStatus.REJECTED
-                record.notes = "Could not resolve entity"
+                record.notes = (
+                    "Could not resolve entity (private invite rechecked)"
+                    if private_invite_retry
+                    else "Could not resolve entity"
+                )
                 await log_repo.add(action="link_validation_failed", result="error", target=link, details="entity not found")
                 await session.commit()
                 return
@@ -170,13 +204,18 @@ class DiscoveryService:
                 logger.info("Link %s is a channel — skipping", link)
                 return
 
-            if not hasattr(entity, "id"):
-                # Private invite previews have a title but no chat ID until
-                # the account joins. Keep them visible without auto-joining.
+            if getattr(entity, "already_member", False) or not hasattr(entity, "id"):
+                # Keep private invites preview-only so this path never queues
+                # them for automatic joining, even if the account is a member.
                 title = getattr(entity, "title", None) or "عنوان نامشخص"
                 members_count = getattr(entity, "participants_count", None)
                 record.status = LinkStatus.PENDING
-                record.notes = f"private_invite_preview:{title}"
+                note_prefix = (
+                    "private_invite_member:"
+                    if getattr(entity, "already_member", False)
+                    else "private_invite_preview:"
+                )
+                record.notes = f"{note_prefix}{title}"
                 await log_repo.add(
                     action="private_invite_previewed",
                     result="success",

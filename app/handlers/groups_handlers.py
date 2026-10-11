@@ -190,6 +190,15 @@ def _format_discovered_links(
             item.status,
             "نامشخص",
         )
+        note = item.notes or ""
+        preview_prefix = "private_invite_preview:"
+        member_prefix = "private_invite_member:"
+        if note.startswith(preview_prefix):
+            status = "دعوت خصوصی پیدا شد؛ عضویت تغییر نکرد"
+            note = note.removeprefix(preview_prefix).strip()
+        elif note.startswith(member_prefix):
+            status = "اکانت قبلاً عضو این گروه است"
+            note = note.removeprefix(member_prefix).strip()
         if safe_link:
             lines.append(
                 f'• <a href="{html.escape(safe_link, quote=True)}">'
@@ -204,11 +213,6 @@ def _format_discovered_links(
                 f"  زمان کشف: {item.discovered_at.strftime('%Y-%m-%d %H:%M')} UTC"
             )
 
-        note = item.notes or ""
-        preview_prefix = "private_invite_preview:"
-        if note.startswith(preview_prefix):
-            status = "گروه خصوصی پیدا شد؛ عضویت انجام نشده"
-            note = note.removeprefix(preview_prefix).strip()
         if note:
             visible_note = (
                 note if len(note) <= NOTE_TEXT_LIMIT
