@@ -13,6 +13,7 @@ from telethon.errors import (
 
 from app.config import settings
 from app.utils.logger import get_logger
+from app.utils.validators import LinkValidator
 
 logger = get_logger(__name__)
 
@@ -66,13 +67,24 @@ class TelegramUserService:
 
     async def resolve_entity(self, link: str) -> Any | None:
         try:
+            invite_hash = LinkValidator.extract_invite_hash(link)
+            if invite_hash:
+                from telethon.tl.functions.messages import CheckChatInviteRequest
+
+                invite = await self.client(CheckChatInviteRequest(invite_hash))
+                # An already-joined invite returns a chat entity; otherwise
+                # Telegram returns a preview. Checking the preview does not join.
+                return getattr(invite, "chat", None) or invite
             return await self.client.get_entity(link)
         except Exception as exc:
             logger.debug("Cannot resolve entity %s: %s", link, exc)
             return None
 
     async def is_group(self, entity: Any) -> bool:
-        return isinstance(entity, (Chat, Channel)) and not getattr(entity, "broadcast", False)
+        if isinstance(entity, (Chat, Channel)):
+            return not getattr(entity, "broadcast", False)
+        # CheckChatInviteRequest returns a ChatInvite preview without an ID.
+        return bool(getattr(entity, "title", None)) and not getattr(entity, "broadcast", False)
 
     async def get_user_bio(self, user_id: int) -> str:
         try:

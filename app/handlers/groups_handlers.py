@@ -205,6 +205,10 @@ def _format_discovered_links(
             )
 
         note = item.notes or ""
+        preview_prefix = "private_invite_preview:"
+        if note.startswith(preview_prefix):
+            status = "گروه خصوصی پیدا شد؛ عضویت انجام نشده"
+            note = note.removeprefix(preview_prefix).strip()
         if note:
             visible_note = (
                 note if len(note) <= NOTE_TEXT_LIMIT

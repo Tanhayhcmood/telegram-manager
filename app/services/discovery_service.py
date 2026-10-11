@@ -170,6 +170,23 @@ class DiscoveryService:
                 logger.info("Link %s is a channel — skipping", link)
                 return
 
+            if not hasattr(entity, "id"):
+                # Private invite previews have a title but no chat ID until
+                # the account joins. Keep them visible without auto-joining.
+                title = getattr(entity, "title", None) or "عنوان نامشخص"
+                members_count = getattr(entity, "participants_count", None)
+                record.status = LinkStatus.PENDING
+                record.notes = f"private_invite_preview:{title}"
+                await log_repo.add(
+                    action="private_invite_previewed",
+                    result="success",
+                    target=link,
+                    details=f"title={title!r} members_count={members_count}",
+                )
+                await session.commit()
+                logger.info("Private group invite previewed without joining")
+                return
+
             group_id: int = entity.id
             title: str | None = getattr(entity, "title", None)
             username: str | None = getattr(entity, "username", None)
