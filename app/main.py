@@ -141,6 +141,8 @@ async def main() -> None:
 
     await _check_db()
     await _init_db()
+    from app.services.runtime_config_service import RuntimeConfigService
+    await RuntimeConfigService.get_instance().load()
 
     bot = Bot(
         token=settings.BOT_TOKEN,
