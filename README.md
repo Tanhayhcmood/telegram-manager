@@ -58,25 +58,15 @@ docker compose up -d
 
 ## ☁️ استقرار روی Render
 
-### ۱. Push به GitHub
-```bash
-git init && git add . && git commit -m "init"
-git remote add origin <your-repo>
-git push -u origin main
-```
+`render.yaml` برای اجرای رایگان از webhook استفاده می‌کند. در Render، سرویس رایگان
+پس از ۱۵ دقیقه بدون ترافیک ورودی می‌خوابد؛ در زمان خواب، اتصال Telethon و کارهای
+پس‌زمینه متوقف می‌شوند. PostgreSQL رایگان پس از ۳۰ روز منقضی می‌شود. این حالت
+برای اجرای دائمی یا داده‌های بلندمدت مناسب نیست.
 
-### ۲. ایجاد سرویس در Render
-- New → Blueprint → فایل `render.yaml` را انتخاب کنید
-
-### ۳. تنظیم متغیرهای محیطی
-```
-TELEGRAM_API_ID       ← از my.telegram.org
-TELEGRAM_API_HASH     ← از my.telegram.org
-TELEGRAM_PHONE        ← شماره تلفن با کد کشور
-TELEGRAM_SESSION_STRING ← از مرحله login
-BOT_TOKEN             ← از @BotFather
-ADMIN_IDS             ← شناسه عددی تلگرام شما
-```
+متغیرهای `BOT_TOKEN`, `TELEGRAM_SESSION_STRING`, `ADMIN_IDS` و `WEBHOOK_SECRET`
+باید در Render به‌صورت secret تنظیم شوند. `DATABASE_URL` از PostgreSQL رایگان
+Render می‌آید. این پیکربندی Redis جداگانه نمی‌سازد؛ وضعیت‌های موقت در حافظه‌اند
+و با خواب یا راه‌اندازی مجدد سرویس از بین می‌روند.
 
 ---
 

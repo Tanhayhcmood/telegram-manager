@@ -1,6 +1,7 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
 
 from app.utils.logger import get_logger
 
@@ -34,18 +35,25 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="▶️ شروع سیستم", callback_data="system_start"),
             InlineKeyboardButton(text="⏹ توقف سیستم", callback_data="system_stop"),
         ],
+        [
+            InlineKeyboardButton(text="📋 وضعیت صف عضویت", callback_data="queue_status"),
+            InlineKeyboardButton(text="⚙️ فاصله عضویت", callback_data="join_delay_menu"),
+        ],
+        [
+            InlineKeyboardButton(text="🆕 ۲ گروه اخیر", callback_data="recent_groups"),
+        ],
+        [
+            InlineKeyboardButton(text="🔄 همگام‌سازی گروه‌ها", callback_data="sync_dialogs"),
+            InlineKeyboardButton(text="👥 همگام‌سازی مخاطبین", callback_data="sync_users"),
+        ],
     ])
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, state: FSMContext) -> None:
     # AdminAuthMiddleware already blocks non-admins before this handler runs.
-    menu_message = await message.answer(
-        "🤖 <b>ربات مدیریت گروه‌های تلگرام</b>\n\nانتخاب کنید:",
-        parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    await menu_message.edit_text(
+    await state.clear()
+    await message.answer(
         "🤖 <b>ربات مدیریت گروه‌های تلگرام</b>\n\nانتخاب کنید:",
         parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
@@ -53,14 +61,15 @@ async def cmd_start(message: Message) -> None:
 
 
 @router.message(Command("menu"))
-async def cmd_menu(message: Message) -> None:
+async def cmd_menu(message: Message, state: FSMContext) -> None:
     # AdminAuthMiddleware already blocks non-admins before this handler runs.
-    menu_message = await message.answer("منوی اصلی:", reply_markup=ReplyKeyboardRemove())
-    await menu_message.edit_text("منوی اصلی:", reply_markup=main_menu_keyboard())
+    await state.clear()
+    await message.answer("منوی اصلی:", reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data == "main_menu")
-async def cb_main_menu(callback: CallbackQuery) -> None:
+async def cb_main_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     await callback.message.edit_text("منوی اصلی:", reply_markup=main_menu_keyboard())  # type: ignore[union-attr]
     await callback.answer()
 

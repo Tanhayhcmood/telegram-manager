@@ -1,10 +1,14 @@
 import asyncio
+import hmac
+import os
 import signal
 import sys
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import Update
 
 from app.config import settings
 from app.utils.logger import get_logger, setup_logging
@@ -61,6 +65,65 @@ def _build_storage():
     return MemoryStorage()
 
 
+async def _start_webhook_server(bot: Bot, dp: Dispatcher) -> web.AppRunner:
+    public_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not public_url.startswith("https://"):
+        raise RuntimeError("RENDER_EXTERNAL_URL must be an HTTPS URL in webhook mode")
+    if not settings.WEBHOOK_SECRET:
+        raise RuntimeError("WEBHOOK_SECRET must be configured in webhook mode")
+
+    async def health_check(_: web.Request) -> web.Response:
+        return web.json_response({"status": "ok"})
+
+    async def handle_webhook(request: web.Request) -> web.Response:
+        supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not hmac.compare_digest(supplied_secret, settings.WEBHOOK_SECRET):
+            return web.Response(status=401, text="Unauthorized")
+
+        update_id: int | None = None
+        try:
+            update = Update.model_validate(
+                await request.json(),
+                context={"bot": bot},
+            )
+            update_id = update.update_id
+            await dp.feed_update(bot, update)
+        except Exception:
+            logger.exception(
+                "Failed to process Telegram webhook update_id=%s",
+                update_id,
+            )
+            return web.Response(status=500, text="Update processing failed")
+
+        return web.Response(text="OK")
+
+    application = web.Application(client_max_size=1_000_000)
+    application.router.add_get("/healthz", health_check)
+    application.router.add_post("/telegram/webhook", handle_webhook)
+
+    runner = web.AppRunner(application)
+    await runner.setup()
+    site = web.TCPSite(
+        runner,
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", "10000")),
+    )
+    await site.start()
+
+    try:
+        await bot.set_webhook(
+            url=f"{public_url}/telegram/webhook",
+            secret_token=settings.WEBHOOK_SECRET,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
+    except Exception:
+        await runner.cleanup()
+        raise
+
+    logger.info("Telegram webhook server started")
+    return runner
+
+
 async def main() -> None:
     setup_logging()
     logger.info("Starting Telegram Group Manager v2")
@@ -78,6 +141,8 @@ async def main() -> None:
 
     await _check_db()
     await _init_db()
+    from app.services.runtime_config_service import RuntimeConfigService
+    await RuntimeConfigService.get_instance().load()
 
     bot = Bot(
         token=settings.BOT_TOKEN,
@@ -122,15 +187,25 @@ async def main() -> None:
     asyncio.create_task(_start_client_safe())
     scheduler.start()
 
-    # Run bot polling until shutdown signal
-    logger.info("Bot polling started")
-    polling_task = asyncio.create_task(
-        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-    )
+    webhook_runner = None
+    polling_task = None
+    if settings.BOT_MODE == "webhook":
+        webhook_runner = await _start_webhook_server(bot, dp)
+    elif settings.BOT_MODE == "polling":
+        logger.info("Bot polling started")
+        polling_task = asyncio.create_task(
+            dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        )
+    else:
+        raise RuntimeError("BOT_MODE must be either 'polling' or 'webhook'")
+
     shutdown_task = asyncio.create_task(_shutdown_event.wait())
+    wait_tasks = [shutdown_task]
+    if polling_task is not None:
+        wait_tasks.append(polling_task)
 
     done, pending = await asyncio.wait(
-        [polling_task, shutdown_task],
+        wait_tasks,
         return_when=asyncio.FIRST_COMPLETED,
     )
 
@@ -146,6 +221,8 @@ async def main() -> None:
     await health.stop()
     await jq.stop()
     await tg.stop()
+    if webhook_runner is not None:
+        await webhook_runner.cleanup()
     await bot.session.close()
     await engine.dispose()
     logger.info("Shutdown complete")

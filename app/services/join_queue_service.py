@@ -111,10 +111,13 @@ class JoinQueueService:
             return
 
         # Random jitter delay (anti-detection)
-        delay = random.uniform(settings.JOIN_DELAY_MIN, settings.JOIN_DELAY_MAX)
+        from app.services.runtime_config_service import RuntimeConfigService
+
+        delay_min, delay_max = RuntimeConfigService.get_instance().get_join_delay()
+        delay = random.uniform(delay_min, delay_max)
         logger.info(
-            "Waiting %.0fs before joining group_id=%d (%r)",
-            delay, task.group_id, task.title,
+            "Waiting %.0fs before joining group_id=%d (%r) [range: %d-%ds]",
+            delay, task.group_id, task.title, delay_min, delay_max,
         )
         await asyncio.sleep(delay)
 

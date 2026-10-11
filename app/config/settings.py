@@ -20,6 +20,8 @@ class Settings(BaseSettings):
 
     # Telegram Bot (Aiogram)
     BOT_TOKEN: str
+    BOT_MODE: str = "polling"
+    WEBHOOK_SECRET: str = ""
 
     # Admin whitelist (comma-separated Telegram user IDs)
     ADMIN_IDS: str = ""

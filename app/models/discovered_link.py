@@ -26,7 +26,11 @@ class DiscoveredLink(Base):
         nullable=False,
     )
     status: Mapped[LinkStatus] = mapped_column(
-        Enum(LinkStatus, name="link_status"),
+        Enum(
+            LinkStatus,
+            name="link_status",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
         default=LinkStatus.PENDING,
         nullable=False,
         index=True,
