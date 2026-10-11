@@ -3,7 +3,7 @@ import html
 import math
 from datetime import datetime, timezone
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -23,6 +23,7 @@ router = Router(name="admin-tools")
 
 JOIN_DELAY_PRESETS = (15, 30, 45, 60, 90, 120)
 MAX_CUSTOM_DELAY_MINUTES = 720
+_backfill_task: asyncio.Task[None] | None = None
 
 
 class JoinDelayStates(StatesGroup):
@@ -374,3 +375,109 @@ async def cb_sync_dialogs(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "sync_users")
 async def cb_sync_users(callback: CallbackQuery) -> None:
     await _run_sync(callback, users=True)
+
+
+def _backfill_links_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="۲۴ ساعت", callback_data="backfill_links:1"),
+            InlineKeyboardButton(text="۳ روز", callback_data="backfill_links:3"),
+            InlineKeyboardButton(text="۷ روز", callback_data="backfill_links:7"),
+        ],
+        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="main_menu")],
+    ])
+
+
+@router.callback_query(F.data == "backfill_links_menu")
+async def cb_backfill_links_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await _safe_edit(
+        callback,
+        "♻️ <b>بازخوانی لینک‌های جاافتاده</b>\n\n"
+        "پیام‌های گروه‌هایی که اکانت فعلی عضو آن‌هاست در بازهٔ انتخابی بررسی می‌شوند. "
+        "پیام خصوصی اسکن نمی‌شود. لینک‌های جدید ثبت و اعتبارسنجی می‌شوند؛ "
+        "این عملیات گروهی را join نمی‌کند و پیامی هم ارسال نمی‌کند.\n\n"
+        "برای محدودکردن درخواست‌ها، هر اجرا حداکثر ۱۰۰ گروه و ۵۰۰۰ پیام را بررسی می‌کند. "
+        "تکرارها دوباره ثبت نمی‌شوند.",
+        reply_markup=_backfill_links_keyboard(),
+    )
+
+
+async def _execute_link_backfill(bot: Bot, chat_id: int, days: int) -> None:
+    global _backfill_task
+    try:
+        from app.services.link_backfill_service import LinkBackfillService
+        from app.services import TelegramUserService
+
+        result = await LinkBackfillService(
+            TelegramUserService.get_instance()
+        ).run(days)
+        truncated_note = (
+            "\n⚠️ به سقف این اجرا رسیدیم؛ احتمال دارد همهٔ گروه‌ها یا پیام‌ها بررسی نشده باشند."
+            if result.truncated
+            else ""
+        )
+        failure_note = (
+            f"\n⚠️ موارد ناموفق: <code>{result.failed_messages:,}</code>"
+            if result.failed_messages
+            else ""
+        )
+        flood_wait_note = (
+            "\n⏸ تلگرام محدودیت موقت درخواست اعمال کرد؛ ادامهٔ بازخوانی متوقف شد."
+            if result.rate_limited
+            else ""
+        )
+        await bot.send_message(
+            chat_id,
+            "✅ <b>بازخوانی پایان یافت</b>\n\n"
+            f"🗓 بازه: <code>{result.days}</code> روز اخیر\n"
+            f"👥 گروه‌ها: <code>{result.groups_scanned:,}</code> از "
+            f"<code>{result.groups_available:,}</code>\n"
+            f"💬 پیام‌های بررسی‌شده: <code>{result.messages_scanned:,}</code>\n"
+            f"🔗 لینک‌های جدید: <code>{result.new_links:,}</code>"
+            f"{failure_note}{flood_wait_note}{truncated_note}",
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+    except Exception as exc:
+        logger.exception("Historical link recovery failed")
+        await bot.send_message(
+            chat_id,
+            f"❌ <b>بازخوانی انجام نشد:</b>\n<code>{html.escape(str(exc)[:300])}</code>",
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+    finally:
+        _backfill_task = None
+
+
+@router.callback_query(F.data.startswith("backfill_links:"))
+async def cb_start_link_backfill(callback: CallbackQuery) -> None:
+    global _backfill_task
+    data = callback.data or ""
+    try:
+        days = int(data.partition(":")[2])
+        if days not in (1, 3, 7):
+            raise ValueError("Invalid recovery period.")
+    except ValueError:
+        await callback.answer("بازهٔ زمانی معتبر نیست.", show_alert=True)
+        return
+
+    if _backfill_task is not None and not _backfill_task.done():
+        await callback.answer("یک بازخوانی دیگر در حال اجراست.", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer("پیام برای شروع عملیات در دسترس نیست.", show_alert=True)
+        return
+
+    await callback.answer()
+    await _safe_edit(
+        callback,
+        f"⏳ بازخوانی لینک‌های {days} روز اخیر شروع شد. "
+        "پس از پایان، نتیجه برایتان ارسال می‌شود.",
+        reply_markup=_backfill_links_keyboard(),
+    )
+    _backfill_task = asyncio.create_task(
+        _execute_link_backfill(callback.bot, callback.message.chat.id, days),
+        name="telegram-link-history-backfill",
+    )

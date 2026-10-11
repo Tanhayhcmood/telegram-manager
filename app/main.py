@@ -75,6 +75,26 @@ async def _start_webhook_server(bot: Bot, dp: Dispatcher) -> web.AppRunner:
     async def health_check(_: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
+    async def telegram_health_check(_: web.Request) -> web.Response:
+        tg = TelegramUserService.get_instance()
+        health = HealthService.get_instance()
+        connected = tg.is_running()
+        expected = tg.is_expected_to_run()
+        healthy = connected and expected and health.is_ready()
+        last_ok = health.last_ok_at()
+        payload = {
+            "status": "ok" if healthy else "degraded",
+            "telegram_user_client": (
+                "connected"
+                if connected
+                else "disconnected"
+                if expected
+                else "stopped_by_admin"
+            ),
+            "last_successful_check": last_ok.isoformat() if last_ok else None,
+        }
+        return web.json_response(payload, status=200 if healthy else 503)
+
     async def handle_webhook(request: web.Request) -> web.Response:
         supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if not hmac.compare_digest(supplied_secret, settings.WEBHOOK_SECRET):
@@ -99,6 +119,7 @@ async def _start_webhook_server(bot: Bot, dp: Dispatcher) -> web.AppRunner:
 
     application = web.Application(client_max_size=1_000_000)
     application.router.add_get("/healthz", health_check)
+    application.router.add_get("/telegram/healthz", telegram_health_check)
     application.router.add_post("/telegram/webhook", handle_webhook)
 
     runner = web.AppRunner(application)
@@ -165,24 +186,26 @@ async def main() -> None:
 
     health = HealthService.get_instance()
     health.set_tg_service(tg)
+    health.set_recovery_callback(jq.start)
 
     scheduler = SchedulerService.get_instance()
     scheduler.set_bot(bot)
 
     # Start user client (non-fatal if session not yet configured)
     async def _start_client_safe() -> None:
+        discovery = DiscoveryService(tg)
+        tg.on_new_message(discovery.process_message)
         try:
             await tg.start()
-            discovery = DiscoveryService(tg)
-            tg.on_new_message(discovery.process_message)
             await jq.start()
-            await health.start()
             logger.info("User client, join queue, and health monitor started")
         except RuntimeError as exc:
             logger.error("User client startup failed: %s", exc)
             await ns.notify_critical("User Client ناموفق", str(exc)[:300])
         except Exception as exc:
             logger.error("Unexpected startup error: %s", exc, exc_info=True)
+        finally:
+            await health.start()
 
     asyncio.create_task(_start_client_safe())
     scheduler.start()

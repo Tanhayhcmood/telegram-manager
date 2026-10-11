@@ -71,6 +71,36 @@ class DiscoveryService:
         except Exception as exc:
             logger.error("Error processing message: %s", exc, exc_info=True)
 
+    async def process_historical_message(self, message: Any, chat_id: int) -> int:
+        """Register links from a past group message without starting group joins."""
+        text = (
+            getattr(message, "raw_text", None)
+            or getattr(message, "message", None)
+            or getattr(message, "text", None)
+            or ""
+        )
+        links = LinkValidator.extract_links(
+            text,
+            entities=getattr(message, "entities", None),
+        )
+        source = f"history:{chat_id}:{message.id}"
+        normalized_links = dict.fromkeys(
+            normalized
+            for raw_link in links
+            if (normalized := LinkValidator.normalize(raw_link))
+        )
+
+        created_count = 0
+        for normalized in normalized_links:
+            created = await self._register_link(
+                normalized,
+                source,
+                enqueue_join=False,
+            )
+            if created:
+                created_count += 1
+        return created_count
+
     async def _get_cached_bio(self, sender_id: int) -> str:
         now = time.monotonic()
         cached = self._bio_cache.get(sender_id)
@@ -126,32 +156,43 @@ class DiscoveryService:
         except Exception as exc:
             logger.debug("Could not track user: %s", exc)
 
-    async def _register_link(self, link: str, source: str) -> None:
+    async def _register_link(
+        self,
+        link: str,
+        source: str,
+        *,
+        enqueue_join: bool = True,
+    ) -> bool:
         should_validate = False
-        is_retry = False
+        private_invite_retry = False
         async with AsyncSessionLocal() as session:
             link_repo = DiscoveredLinkRepository(session)
             log_repo = LogRepository(session)
             record, created = await link_repo.register(link, source)
-            if not created:
-                if (
-                    LinkValidator.is_private_invite(link)
-                    and record.status == LinkStatus.REJECTED
-                    and record.notes == "Could not resolve entity"
-                ):
-                    record.status = LinkStatus.PENDING
-                    record.notes = "Rechecking private invite"
-                    await log_repo.add(
-                        action="private_invite_rechecked",
-                        result="success",
-                        target=link,
-                    )
-                    await session.commit()
-                    should_validate = True
-                    is_retry = True
-                else:
-                    return
-            else:
+            retry_private_invite = (
+                not created
+                and LinkValidator.is_private_invite(link)
+                and record.status == LinkStatus.REJECTED
+                and record.notes == "Could not resolve entity"
+            )
+            retry_validation = (
+                not created
+                and not enqueue_join
+                and record.status == LinkStatus.PENDING
+            )
+            if not created and not retry_private_invite and not retry_validation:
+                return False
+            if retry_private_invite:
+                record.status = LinkStatus.PENDING
+                record.notes = "Rechecking private invite"
+                await log_repo.add(
+                    action="private_invite_rechecked",
+                    result="success",
+                    target=link,
+                )
+                private_invite_retry = True
+                should_validate = True
+            if created:
                 logger.info("Discovered new link: %s from %s", link, source)
                 await log_repo.add(
                     action="link_discovered",
@@ -159,16 +200,25 @@ class DiscoveryService:
                     target=link,
                     details=f"source={source}",
                 )
-                await session.commit()
                 should_validate = True
+            if retry_validation:
+                should_validate = True
+            await session.commit()
 
         # Validate and enqueue outside the session so we open a fresh connection
         if should_validate:
-            await self._validate_and_enqueue(link, private_invite_retry=is_retry)
+            await self._validate_and_enqueue(
+                link,
+                enqueue_join=enqueue_join,
+                private_invite_retry=private_invite_retry,
+            )
+        return created
 
     async def _validate_and_enqueue(
         self,
         link: str,
+        *,
+        enqueue_join: bool = True,
         private_invite_retry: bool = False,
     ) -> None:
         # Resolve the entity via Telegram API (may be slow — done outside any DB session)
@@ -253,9 +303,21 @@ class DiscoveryService:
                 details=f"group_id={group_id} title={title!r}",
             )
             await session.commit()
-            logger.info("Registered group %d (%s) — enqueueing for join", group_id, title)
+            if enqueue_join:
+                logger.info(
+                    "Registered group %d (%s) — enqueueing for join",
+                    group_id,
+                    title,
+                )
+            else:
+                logger.info(
+                    "Registered historic group %d (%s) without starting a join",
+                    group_id,
+                    title,
+                )
 
-        # Push to join queue (sequential, jittered)
-        from app.services.join_queue_service import JoinQueueService
-        jq = JoinQueueService.get_instance()
-        await jq.enqueue(group_id=group_id, link=link, title=title)
+        if enqueue_join:
+            # Push to join queue (sequential, jittered)
+            from app.services.join_queue_service import JoinQueueService
+            jq = JoinQueueService.get_instance()
+            await jq.enqueue(group_id=group_id, link=link, title=title)
