@@ -35,6 +35,8 @@ class TelegramUserService:
             auto_reconnect=True,
         )
         self._running = False
+        self._desired_running = False
+        self._connection_lock = asyncio.Lock()
 
     @classmethod
     def get_instance(cls) -> "TelegramUserService":
@@ -43,22 +45,55 @@ class TelegramUserService:
         return cls._instance
 
     async def start(self) -> None:
-        await self.client.connect()
-        if not await self.client.is_user_authorized():
-            logger.warning("Telegram session not authorized — interactive login required")
-            raise RuntimeError(
-                "Telegram session is not authorized. "
-                "Run `python -m app.cli login` locally to generate a session string "
-                "and set TELEGRAM_SESSION_STRING in your environment."
-            )
-        me = await self.client.get_me()
-        logger.info("Telegram user client connected", extra={"user": str(me)})
-        self._running = True
+        self._desired_running = True
+        if not await self.reconnect_if_needed():
+            raise RuntimeError("Telegram client start was cancelled.")
+        logger.info("Telegram user client connected")
+
+    async def reconnect_if_needed(self) -> bool:
+        """Reconnect only when the account is expected to be running."""
+        if not self._desired_running:
+            return False
+
+        async with self._connection_lock:
+            if not self._desired_running:
+                return False
+            if self.is_running():
+                return True
+
+            self._running = False
+            try:
+                if not self.client.is_connected():
+                    await self.client.connect()
+                if not await self.client.is_user_authorized():
+                    await self.client.disconnect()
+                    logger.warning(
+                        "Telegram session not authorized — interactive login required"
+                    )
+                    raise RuntimeError(
+                        "Telegram session is not authorized. "
+                        "Run `python -m app.cli login` locally to generate a session string "
+                        "and set TELEGRAM_SESSION_STRING in your environment."
+                    )
+
+                await self.client.get_me()
+                self._running = True
+                logger.info("Telegram user client connection is active")
+                return True
+            except Exception:
+                self._running = False
+                raise
+
+    def is_expected_to_run(self) -> bool:
+        """Whether an admin or startup requested that this client stay online."""
+        return self._desired_running
 
     async def stop(self) -> None:
-        self._running = False
-        if self.client.is_connected():
-            await self.client.disconnect()
+        async with self._connection_lock:
+            self._desired_running = False
+            self._running = False
+            if self.client.is_connected():
+                await self.client.disconnect()
         logger.info("Telegram user client disconnected")
 
     def is_running(self) -> bool:
@@ -180,6 +215,10 @@ class TelegramUserService:
         except Exception as exc:
             logger.exception("Failed to fetch Telegram dialogs")
             raise RuntimeError("دریافت گفتگوهای تلگرام ناموفق بود.") from exc
+
+    async def get_live_dialogs(self, limit: int = 3000) -> list[Any]:
+        """Return live Telegram dialogs for read-only operations."""
+        return await self._get_live_dialogs(limit=limit)
 
     async def get_all_groups_from_dialogs(self, limit: int = 3000) -> list[dict[str, Any]]:
         """Return the active account's group dialogs without broadcast channels."""
