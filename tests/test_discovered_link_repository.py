@@ -15,12 +15,6 @@ class _Result:
     def scalar_one_or_none(self) -> Any | None:
         return self._value
 
-    def scalars(self) -> "_Result":
-        return self
-
-    def all(self) -> list[Any]:
-        return self._value
-
 
 class _Session:
     def __init__(self, *results: Any | None) -> None:
@@ -33,24 +27,6 @@ class _Session:
 
 
 class DiscoveredLinkRepositoryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_get_latest_orders_newest_first_and_applies_pagination(self) -> None:
-        links = [
-            DiscoveredLink(link="https://t.me/newest", status=LinkStatus.PENDING),
-            DiscoveredLink(link="https://t.me/older", status=LinkStatus.REJECTED),
-        ]
-        session = _Session(links)
-
-        result = await DiscoveredLinkRepository(cast(AsyncSession, session)).get_latest(
-            limit=2,
-            offset=3,
-        )
-
-        self.assertEqual(result, links)
-        statement = str(session.statements[0].compile(dialect=postgresql.dialect()))
-        self.assertIn("ORDER BY discovered_links.discovered_at DESC", statement)
-        self.assertIn("LIMIT", statement)
-        self.assertIn("OFFSET", statement)
-
     async def test_register_uses_atomic_conflict_handling_for_racing_duplicate(self) -> None:
         existing = DiscoveredLink(
             link="https://t.me/example",

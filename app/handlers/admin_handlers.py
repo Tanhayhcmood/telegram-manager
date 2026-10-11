@@ -20,9 +20,6 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔴 ناموفق‌ها", callback_data="groups_failed"),
         ],
         [
-            InlineKeyboardButton(text="🔗 لینک‌های کشف‌شده", callback_data="discovered_links"),
-        ],
-        [
             InlineKeyboardButton(text="📨 ارسال به گروه", callback_data="send_message"),
             InlineKeyboardButton(text="📢 ارسال همگانی", callback_data="broadcast"),
         ],
