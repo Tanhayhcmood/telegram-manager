@@ -1,16 +1,23 @@
+import html
+
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.database.connection import AsyncSessionLocal
-from app.repositories import GroupRepository
-from app.repositories.join_attempt_repository import JoinAttemptRepository
+from app.models.discovered_link import DiscoveredLink, LinkStatus
 from app.models.group import GroupStatus
+from app.repositories import DiscoveredLinkRepository, GroupRepository
+from app.repositories.join_attempt_repository import JoinAttemptRepository
 from app.utils.logger import get_logger
+from app.utils.validators import LinkValidator
 
 logger = get_logger(__name__)
 router = Router(name="groups")
 
 PAGE_SIZE = 15
+LINKS_PAGE_SIZE = 8
+LINK_TEXT_LIMIT = 96
+NOTE_TEXT_LIMIT = 100
 
 
 def _back_btn() -> InlineKeyboardMarkup:
@@ -127,6 +134,134 @@ async def _show_pending_page(callback: CallbackQuery, page: int) -> None:
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=action_btns),
+    )
+
+
+# ── Discovered links with pagination ──────────────────────────────────────────
+
+_LINK_STATUS_LABELS = {
+    LinkStatus.PENDING: "در حال بررسی",
+    LinkStatus.APPROVED: "معتبر؛ در صف عضویت",
+    LinkStatus.REJECTED: "ردشده یا گروه نیست",
+    LinkStatus.JOINED: "عضو شده",
+    LinkStatus.FAILED: "عضویت ناموفق",
+}
+
+
+def _discovered_links_keyboard(page: int, total: int) -> InlineKeyboardMarkup:
+    buttons: list[list[InlineKeyboardButton]] = []
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="◀️ قبلی",
+                callback_data=f"discovered_links_page:{page - 1}",
+            )
+        )
+    if (page + 1) * LINKS_PAGE_SIZE < total:
+        navigation.append(
+            InlineKeyboardButton(
+                text="بعدی ▶️",
+                callback_data=f"discovered_links_page:{page + 1}",
+            )
+        )
+    if navigation:
+        buttons.append(navigation)
+    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _format_discovered_links(
+    links: list[DiscoveredLink],
+    total: int,
+    page: int,
+) -> str:
+    page_count = max(1, (total + LINKS_PAGE_SIZE - 1) // LINKS_PAGE_SIZE)
+    lines = [
+        f"🔗 <b>لینک‌های کشف‌شده</b> ({total:,} مورد — صفحه {page + 1} از {page_count}):\n"
+    ]
+    for item in links:
+        link = item.link or ""
+        safe_link = LinkValidator.normalize(link)
+        visible_link = safe_link or link
+        if len(visible_link) > LINK_TEXT_LIMIT:
+            visible_link = f"{visible_link[:LINK_TEXT_LIMIT - 1]}…"
+        status = _LINK_STATUS_LABELS.get(
+            item.status,
+            "نامشخص",
+        )
+        note = item.notes or ""
+        preview_prefix = "private_invite_preview:"
+        member_prefix = "private_invite_member:"
+        if note.startswith(preview_prefix):
+            status = "دعوت خصوصی پیدا شد؛ عضویت تغییر نکرد"
+            note = note.removeprefix(preview_prefix).strip()
+        elif note.startswith(member_prefix):
+            status = "اکانت قبلاً عضو این گروه است"
+            note = note.removeprefix(member_prefix).strip()
+        if safe_link:
+            lines.append(
+                f'• <a href="{html.escape(safe_link, quote=True)}">'
+                f"{html.escape(visible_link)}</a>"
+            )
+        else:
+            lines.append(f"• <code>{html.escape(visible_link)}</code>")
+        lines.append(f"  وضعیت: <b>{status}</b>")
+
+        if item.discovered_at:
+            lines.append(
+                f"  زمان کشف: {item.discovered_at.strftime('%Y-%m-%d %H:%M')} UTC"
+            )
+
+        if note:
+            visible_note = (
+                note if len(note) <= NOTE_TEXT_LIMIT
+                else f"{note[:NOTE_TEXT_LIMIT - 1]}…"
+            )
+            lines.append(f"  توضیح: {html.escape(visible_note)}")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "discovered_links")
+async def cb_discovered_links(callback: CallbackQuery) -> None:
+    await _show_discovered_links_page(callback, 0)
+
+
+@router.callback_query(F.data.startswith("discovered_links_page:"))
+async def cb_discovered_links_page(callback: CallbackQuery) -> None:
+    try:
+        page = int((callback.data or "").partition(":")[2])
+    except ValueError:
+        await callback.answer("شماره صفحه نامعتبر است.", show_alert=True)
+        return
+    if page < 0:
+        await callback.answer("شماره صفحه نامعتبر است.", show_alert=True)
+        return
+    await _show_discovered_links_page(callback, page)
+
+
+async def _show_discovered_links_page(callback: CallbackQuery, page: int) -> None:
+    await callback.answer()
+    async with AsyncSessionLocal() as session:
+        repo = DiscoveredLinkRepository(session)
+        total = await repo.count()
+        max_page = max(0, (total - 1) // LINKS_PAGE_SIZE)
+        page = min(page, max_page)
+        links = await repo.get_latest(
+            limit=LINKS_PAGE_SIZE,
+            offset=page * LINKS_PAGE_SIZE,
+        )
+
+    if not links:
+        text = "🔗 هنوز لینکی کشف نشده است."
+    else:
+        text = _format_discovered_links(links, total, page)
+
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text,
+        parse_mode="HTML",
+        reply_markup=_discovered_links_keyboard(page, total),
+        disable_web_page_preview=True,
     )
 
 

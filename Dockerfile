@@ -27,8 +27,8 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV LOG_JSON=true
 
-# Health check: verify DB connectivity
+# Health check the HTTP listener without depending on external services.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))" || exit 1
+    CMD python -c 'import os, urllib.request; urllib.request.urlopen("http://127.0.0.1:%s/health" % os.environ.get("PORT", "10000"), timeout=5)' || exit 1
 
 CMD ["python", "-m", "app.main"]

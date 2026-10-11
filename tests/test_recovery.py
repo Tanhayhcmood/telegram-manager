@@ -1,8 +1,9 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
+from app.models.discovered_link import LinkStatus
 from app.services.discovery_service import DiscoveryService
 from app.services.health_service import HealthService
 from app.services.link_backfill_service import LinkBackfillService
@@ -138,6 +139,68 @@ class HistoricalLinkRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await service.run(30)
 
         tg.get_live_dialogs.assert_not_awaited()
+
+
+class PrivateInviteSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejected_private_invite_is_rechecked_only_once(self) -> None:
+        link = "https://t.me/joinchat/InviteHash123"
+        record = SimpleNamespace(
+            status=LinkStatus.REJECTED,
+            notes="Could not resolve entity",
+        )
+        session = AsyncMock()
+        session_context = Mock()
+        session_context.__aenter__ = AsyncMock(return_value=session)
+        session_context.__aexit__ = AsyncMock(return_value=False)
+
+        link_repository = Mock()
+        link_repository.register = AsyncMock(return_value=(record, False))
+        log_repository = Mock()
+        log_repository.add = AsyncMock()
+        service = DiscoveryService(SimpleNamespace())
+        service._validate_and_enqueue = AsyncMock()
+
+        with (
+            patch(
+                "app.services.discovery_service.AsyncSessionLocal",
+                return_value=session_context,
+            ),
+            patch(
+                "app.services.discovery_service.DiscoveredLinkRepository",
+                return_value=link_repository,
+            ),
+            patch(
+                "app.services.discovery_service.LogRepository",
+                return_value=log_repository,
+            ),
+        ):
+            await service._register_link(link, "test")
+            await service._register_link(link, "test")
+
+        service._validate_and_enqueue.assert_awaited_once()
+        self.assertTrue(
+            service._validate_and_enqueue.await_args.kwargs["private_invite_retry"]
+        )
+        self.assertEqual(record.status, LinkStatus.PENDING)
+
+    async def test_private_invite_resolution_times_out_without_joining(self) -> None:
+        async def stalled_request(_: object) -> None:
+            await asyncio.Event().wait()
+
+        service = object.__new__(TelegramUserService)
+        service.client = Mock(side_effect=stalled_request)
+
+        with patch(
+            "app.services.telegram_service.ENTITY_RESOLUTION_TIMEOUT",
+            0.01,
+        ):
+            result = await asyncio.wait_for(
+                service.resolve_entity("https://t.me/joinchat/InviteHash123"),
+                timeout=0.2,
+            )
+
+        self.assertIsNone(result)
+        service.client.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -72,6 +72,19 @@ class LinkValidatorTests(unittest.TestCase):
             "example_group",
         )
 
+    def test_extracts_private_invite_hash_without_joining(self) -> None:
+        self.assertEqual(
+            LinkValidator.extract_invite_hash("https://t.me/+GZM90MK0I91hMWU8"),
+            "GZM90MK0I91hMWU8",
+        )
+        self.assertEqual(
+            LinkValidator.extract_invite_hash("https://t.me/joinchat/InviteHash123"),
+            "InviteHash123",
+        )
+        self.assertIsNone(
+            LinkValidator.extract_invite_hash("https://t.me/Public_Group")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

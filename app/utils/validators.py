@@ -100,6 +100,13 @@ class LinkValidator:
         return bool(normalized and urlsplit(normalized).path.startswith("/+"))
 
     @staticmethod
+    def extract_invite_hash(link: str) -> str | None:
+        normalized = LinkValidator.normalize(link)
+        if not normalized or not LinkValidator.is_private_invite(normalized):
+            return None
+        return urlsplit(normalized).path.removeprefix("/+")
+
+    @staticmethod
     def extract_username(link: str) -> str | None:
         normalized = LinkValidator.normalize(link)
         if not normalized or LinkValidator.is_private_invite(normalized):

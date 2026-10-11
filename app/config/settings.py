@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     S3_REGION: str = "auto"
 
     # Discovery
-    # Comma-separated keywords; if set, only messages containing at least one are scanned
+    # Legacy compatibility only; link discovery is not keyword-filtered.
     DISCOVERY_KEYWORDS: str = ""
     MAX_JOINS_PER_DAY: int = 50       # Anti-detection: max joins in 24h
 

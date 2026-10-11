@@ -3,7 +3,6 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from app.config import settings
 from app.database.connection import AsyncSessionLocal
 from app.repositories import GroupRepository, DiscoveredLinkRepository, LogRepository, ContactedUserRepository
 from app.models.group import GroupStatus
@@ -37,36 +36,31 @@ class DiscoveryService:
             if sender_id and sender_id > 0:
                 await self._track_user(event)
 
-            keywords = settings.get_discovery_keywords()
-            text_lower = text.casefold()
-            message_matches_keywords = any(kw in text_lower for kw in keywords)
-            links = LinkValidator.extract_links(
+            message_links = LinkValidator.extract_links(
                 text,
                 entities=getattr(message, "entities", None),
             )
 
-            # Direct links should not be discarded just because their message
-            # lacks a keyword. Fetch bios only as a fallback, and cache them so
-            # repeated messages from the same sender do not trigger API calls.
-            if not links and sender_id and (not keywords or message_matches_keywords):
+            links_to_register: dict[str, str] = {}
+            message_source = f"message:{event.chat_id}:{event.message.id}"
+            for raw_link in message_links:
+                normalized = LinkValidator.normalize(raw_link)
+                if normalized:
+                    links_to_register.setdefault(normalized, message_source)
+
+            # Inspect each accessible sender profile independently of message
+            # text or keyword filters. The cache keeps this bounded for active
+            # users, and profile text itself is never persisted.
+            if sender_id and sender_id > 0:
                 bio = await self._get_cached_bio(sender_id)
-                if bio and (
-                    not keywords
-                    or any(keyword in bio.casefold() for keyword in keywords)
-                ):
-                    links = LinkValidator.extract_links(bio)
+                bio_source = f"user_bio:{sender_id}:chat:{event.chat_id}"
+                for raw_link in LinkValidator.extract_links(bio):
+                    normalized = LinkValidator.normalize(raw_link)
+                    if normalized:
+                        links_to_register.setdefault(normalized, bio_source)
 
-            if not links:
-                return
-
-            source = f"message:{event.chat_id}:{event.message.id}"
-            normalized_links = dict.fromkeys(
-                normalized
-                for raw_link in links
-                if (normalized := LinkValidator.normalize(raw_link))
-            )
-            for normalized in normalized_links:
-                await self._register_link(normalized, source)
+            for link, source in links_to_register.items():
+                await self._register_link(link, source)
 
         except Exception as exc:
             logger.error("Error processing message: %s", exc, exc_info=True)
@@ -79,21 +73,30 @@ class DiscoveryService:
             or getattr(message, "text", None)
             or ""
         )
-        links = LinkValidator.extract_links(
+        message_links = LinkValidator.extract_links(
             text,
             entities=getattr(message, "entities", None),
         )
-        source = f"history:{chat_id}:{message.id}"
-        normalized_links = dict.fromkeys(
-            normalized
-            for raw_link in links
-            if (normalized := LinkValidator.normalize(raw_link))
-        )
+        links_to_register: dict[str, str] = {}
+        message_source = f"history:{chat_id}:{message.id}"
+        for raw_link in message_links:
+            normalized = LinkValidator.normalize(raw_link)
+            if normalized:
+                links_to_register.setdefault(normalized, message_source)
+
+        sender_id = getattr(message, "sender_id", None)
+        if sender_id and sender_id > 0:
+            bio = await self._get_cached_bio(sender_id)
+            bio_source = f"user_bio:{sender_id}:history_chat:{chat_id}"
+            for raw_link in LinkValidator.extract_links(bio):
+                normalized = LinkValidator.normalize(raw_link)
+                if normalized:
+                    links_to_register.setdefault(normalized, bio_source)
 
         created_count = 0
-        for normalized in normalized_links:
+        for link, source in links_to_register.items():
             created = await self._register_link(
-                normalized,
+                link,
                 source,
                 enqueue_join=False,
             )
@@ -163,17 +166,35 @@ class DiscoveryService:
         *,
         enqueue_join: bool = True,
     ) -> bool:
+        should_validate = False
+        private_invite_retry = False
         async with AsyncSessionLocal() as session:
             link_repo = DiscoveredLinkRepository(session)
             log_repo = LogRepository(session)
             record, created = await link_repo.register(link, source)
+            retry_private_invite = (
+                not created
+                and LinkValidator.is_private_invite(link)
+                and record.status == LinkStatus.REJECTED
+                and record.notes == "Could not resolve entity"
+            )
             retry_validation = (
                 not created
                 and not enqueue_join
                 and record.status == LinkStatus.PENDING
             )
-            if not created and not retry_validation:
+            if not created and not retry_private_invite and not retry_validation:
                 return False
+            if retry_private_invite:
+                record.status = LinkStatus.PENDING
+                record.notes = "Rechecking private invite"
+                await log_repo.add(
+                    action="private_invite_rechecked",
+                    result="success",
+                    target=link,
+                )
+                private_invite_retry = True
+                should_validate = True
             if created:
                 logger.info("Discovered new link: %s from %s", link, source)
                 await log_repo.add(
@@ -182,10 +203,18 @@ class DiscoveryService:
                     target=link,
                     details=f"source={source}",
                 )
+                should_validate = True
+            if retry_validation:
+                should_validate = True
             await session.commit()
 
         # Validate and enqueue outside the session so we open a fresh connection
-        await self._validate_and_enqueue(link, enqueue_join=enqueue_join)
+        if should_validate:
+            await self._validate_and_enqueue(
+                link,
+                enqueue_join=enqueue_join,
+                private_invite_retry=private_invite_retry,
+            )
         return created
 
     async def _validate_and_enqueue(
@@ -193,9 +222,17 @@ class DiscoveryService:
         link: str,
         *,
         enqueue_join: bool = True,
+        private_invite_retry: bool = False,
     ) -> None:
         # Resolve the entity via Telegram API (may be slow — done outside any DB session)
-        entity = await self._tg.resolve_entity(link)
+        try:
+            entity = await asyncio.wait_for(
+                self._tg.resolve_entity(link),
+                timeout=25.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Timed out validating discovered invite/entity: %s", link)
+            entity = None
 
         async with AsyncSessionLocal() as session:
             link_repo = DiscoveredLinkRepository(session)
@@ -209,7 +246,11 @@ class DiscoveryService:
 
             if entity is None:
                 record.status = LinkStatus.REJECTED
-                record.notes = "Could not resolve entity"
+                record.notes = (
+                    "Could not resolve entity (private invite rechecked)"
+                    if private_invite_retry
+                    else "Could not resolve entity"
+                )
                 await log_repo.add(action="link_validation_failed", result="error", target=link, details="entity not found")
                 await session.commit()
                 return
@@ -221,6 +262,28 @@ class DiscoveryService:
                 await log_repo.add(action="link_classified_channel", result="skipped", target=link)
                 await session.commit()
                 logger.info("Link %s is a channel — skipping", link)
+                return
+
+            if getattr(entity, "already_member", False) or not hasattr(entity, "id"):
+                # Keep private invites preview-only so this path never queues
+                # them for automatic joining, even if the account is a member.
+                title = getattr(entity, "title", None) or "عنوان نامشخص"
+                members_count = getattr(entity, "participants_count", None)
+                record.status = LinkStatus.PENDING
+                note_prefix = (
+                    "private_invite_member:"
+                    if getattr(entity, "already_member", False)
+                    else "private_invite_preview:"
+                )
+                record.notes = f"{note_prefix}{title}"
+                await log_repo.add(
+                    action="private_invite_previewed",
+                    result="success",
+                    target=link,
+                    details=f"title={title!r} members_count={members_count}",
+                )
+                await session.commit()
+                logger.info("Private group invite previewed without joining")
                 return
 
             group_id: int = entity.id

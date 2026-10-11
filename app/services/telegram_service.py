@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -13,8 +14,18 @@ from telethon.errors import (
 
 from app.config import settings
 from app.utils.logger import get_logger
+from app.utils.validators import LinkValidator
 
 logger = get_logger(__name__)
+ENTITY_RESOLUTION_TIMEOUT = 20.0
+
+
+@dataclass(frozen=True)
+class InvitePreview:
+    title: str
+    participants_count: int | None
+    broadcast: bool
+    already_member: bool
 
 
 class TelegramUserService:
@@ -101,13 +112,47 @@ class TelegramUserService:
 
     async def resolve_entity(self, link: str) -> Any | None:
         try:
-            return await self.client.get_entity(link)
+            invite_hash = LinkValidator.extract_invite_hash(link)
+            if invite_hash:
+                from telethon.tl.functions.messages import CheckChatInviteRequest
+
+                invite = await asyncio.wait_for(
+                    self.client(CheckChatInviteRequest(invite_hash)),
+                    timeout=ENTITY_RESOLUTION_TIMEOUT,
+                )
+                joined_chat = getattr(invite, "chat", None)
+                preview = joined_chat or invite
+                title = getattr(preview, "title", None)
+                if not title:
+                    return None
+                # Keep a preview-only result even if already a member so
+                # discovery never queues a private invite for automatic joining.
+                return InvitePreview(
+                    title=title,
+                    participants_count=getattr(preview, "participants_count", None),
+                    broadcast=bool(getattr(preview, "broadcast", False)),
+                    already_member=joined_chat is not None,
+                )
+            return await asyncio.wait_for(
+                self.client.get_entity(link),
+                timeout=ENTITY_RESOLUTION_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out after %.0f seconds resolving Telegram invite/entity",
+                ENTITY_RESOLUTION_TIMEOUT,
+            )
+            return None
         except Exception as exc:
             logger.debug("Cannot resolve entity %s: %s", link, exc)
             return None
 
     async def is_group(self, entity: Any) -> bool:
-        return isinstance(entity, (Chat, Channel)) and not getattr(entity, "broadcast", False)
+        if isinstance(entity, InvitePreview):
+            return not entity.broadcast
+        if isinstance(entity, (Chat, Channel)):
+            return not getattr(entity, "broadcast", False)
+        return False
 
     async def get_user_bio(self, user_id: int) -> str:
         try:
