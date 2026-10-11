@@ -17,6 +17,7 @@ from app.utils.logger import get_logger
 from app.utils.validators import LinkValidator
 
 logger = get_logger(__name__)
+ENTITY_RESOLUTION_TIMEOUT = 20.0
 
 
 @dataclass(frozen=True)
@@ -115,7 +116,10 @@ class TelegramUserService:
             if invite_hash:
                 from telethon.tl.functions.messages import CheckChatInviteRequest
 
-                invite = await self.client(CheckChatInviteRequest(invite_hash))
+                invite = await asyncio.wait_for(
+                    self.client(CheckChatInviteRequest(invite_hash)),
+                    timeout=ENTITY_RESOLUTION_TIMEOUT,
+                )
                 joined_chat = getattr(invite, "chat", None)
                 preview = joined_chat or invite
                 title = getattr(preview, "title", None)
@@ -129,7 +133,16 @@ class TelegramUserService:
                     broadcast=bool(getattr(preview, "broadcast", False)),
                     already_member=joined_chat is not None,
                 )
-            return await self.client.get_entity(link)
+            return await asyncio.wait_for(
+                self.client.get_entity(link),
+                timeout=ENTITY_RESOLUTION_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out after %.0f seconds resolving Telegram invite/entity",
+                ENTITY_RESOLUTION_TIMEOUT,
+            )
+            return None
         except Exception as exc:
             logger.debug("Cannot resolve entity %s: %s", link, exc)
             return None

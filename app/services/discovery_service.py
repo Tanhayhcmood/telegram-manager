@@ -222,7 +222,14 @@ class DiscoveryService:
         private_invite_retry: bool = False,
     ) -> None:
         # Resolve the entity via Telegram API (may be slow — done outside any DB session)
-        entity = await self._tg.resolve_entity(link)
+        try:
+            entity = await asyncio.wait_for(
+                self._tg.resolve_entity(link),
+                timeout=25.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Timed out validating discovered invite/entity: %s", link)
+            entity = None
 
         async with AsyncSessionLocal() as session:
             link_repo = DiscoveredLinkRepository(session)
