@@ -1,4 +1,5 @@
-from sqlalchemy import select, func
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.discovered_link import DiscoveredLink, LinkStatus
@@ -39,8 +40,22 @@ class DiscoveredLinkRepository(BaseRepository[DiscoveredLink]):
         existing = await self.get_by_link(link)
         if existing is not None:
             return existing, False
-        record = DiscoveredLink(link=link, source=source, status=LinkStatus.PENDING)
-        self._session.add(record)
-        await self._session.flush()
-        await self._session.refresh(record)
-        return record, True
+
+        statement = (
+            pg_insert(DiscoveredLink)
+            .values(link=link, source=source, status=LinkStatus.PENDING)
+            .on_conflict_do_nothing(index_elements=[DiscoveredLink.link])
+            .returning(DiscoveredLink)
+        )
+        result = await self._session.execute(statement)
+        record = result.scalar_one_or_none()
+        if record is not None:
+            return record, True
+
+        # Another worker may have inserted this link after the initial read.
+        existing = await self.get_by_link(link)
+        if existing is None:
+            raise RuntimeError(
+                f"Link {link!r} conflicted during registration but could not be loaded"
+            )
+        return existing, False

@@ -80,14 +80,19 @@ async def _start_webhook_server(bot: Bot, dp: Dispatcher) -> web.AppRunner:
         if not hmac.compare_digest(supplied_secret, settings.WEBHOOK_SECRET):
             return web.Response(status=401, text="Unauthorized")
 
+        update_id: int | None = None
         try:
             update = Update.model_validate(
                 await request.json(),
                 context={"bot": bot},
             )
+            update_id = update.update_id
             await dp.feed_update(bot, update)
         except Exception:
-            logger.error("Failed to process Telegram webhook update")
+            logger.exception(
+                "Failed to process Telegram webhook update_id=%s",
+                update_id,
+            )
             return web.Response(status=500, text="Update processing failed")
 
         return web.Response(text="OK")
