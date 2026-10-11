@@ -3,7 +3,6 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from app.config import settings
 from app.database.connection import AsyncSessionLocal
 from app.repositories import GroupRepository, DiscoveredLinkRepository, LogRepository, ContactedUserRepository
 from app.models.group import GroupStatus
@@ -37,36 +36,31 @@ class DiscoveryService:
             if sender_id and sender_id > 0:
                 await self._track_user(event)
 
-            keywords = settings.get_discovery_keywords()
-            text_lower = text.casefold()
-            message_matches_keywords = any(kw in text_lower for kw in keywords)
-            links = LinkValidator.extract_links(
+            message_links = LinkValidator.extract_links(
                 text,
                 entities=getattr(message, "entities", None),
             )
 
-            # Direct links should not be discarded just because their message
-            # lacks a keyword. Fetch bios only as a fallback, and cache them so
-            # repeated messages from the same sender do not trigger API calls.
-            if not links and sender_id and (not keywords or message_matches_keywords):
+            links_to_register: dict[str, str] = {}
+            message_source = f"message:{event.chat_id}:{event.message.id}"
+            for raw_link in message_links:
+                normalized = LinkValidator.normalize(raw_link)
+                if normalized:
+                    links_to_register.setdefault(normalized, message_source)
+
+            # Inspect each accessible sender profile independently of message
+            # text or keyword filters. The cache keeps this bounded for active
+            # users, and profile text itself is never persisted.
+            if sender_id and sender_id > 0:
                 bio = await self._get_cached_bio(sender_id)
-                if bio and (
-                    not keywords
-                    or any(keyword in bio.casefold() for keyword in keywords)
-                ):
-                    links = LinkValidator.extract_links(bio)
+                bio_source = f"user_bio:{sender_id}:chat:{event.chat_id}"
+                for raw_link in LinkValidator.extract_links(bio):
+                    normalized = LinkValidator.normalize(raw_link)
+                    if normalized:
+                        links_to_register.setdefault(normalized, bio_source)
 
-            if not links:
-                return
-
-            source = f"message:{event.chat_id}:{event.message.id}"
-            normalized_links = dict.fromkeys(
-                normalized
-                for raw_link in links
-                if (normalized := LinkValidator.normalize(raw_link))
-            )
-            for normalized in normalized_links:
-                await self._register_link(normalized, source)
+            for link, source in links_to_register.items():
+                await self._register_link(link, source)
 
         except Exception as exc:
             logger.error("Error processing message: %s", exc, exc_info=True)
@@ -79,21 +73,30 @@ class DiscoveryService:
             or getattr(message, "text", None)
             or ""
         )
-        links = LinkValidator.extract_links(
+        message_links = LinkValidator.extract_links(
             text,
             entities=getattr(message, "entities", None),
         )
-        source = f"history:{chat_id}:{message.id}"
-        normalized_links = dict.fromkeys(
-            normalized
-            for raw_link in links
-            if (normalized := LinkValidator.normalize(raw_link))
-        )
+        links_to_register: dict[str, str] = {}
+        message_source = f"history:{chat_id}:{message.id}"
+        for raw_link in message_links:
+            normalized = LinkValidator.normalize(raw_link)
+            if normalized:
+                links_to_register.setdefault(normalized, message_source)
+
+        sender_id = getattr(message, "sender_id", None)
+        if sender_id and sender_id > 0:
+            bio = await self._get_cached_bio(sender_id)
+            bio_source = f"user_bio:{sender_id}:history_chat:{chat_id}"
+            for raw_link in LinkValidator.extract_links(bio):
+                normalized = LinkValidator.normalize(raw_link)
+                if normalized:
+                    links_to_register.setdefault(normalized, bio_source)
 
         created_count = 0
-        for normalized in normalized_links:
+        for link, source in links_to_register.items():
             created = await self._register_link(
-                normalized,
+                link,
                 source,
                 enqueue_join=False,
             )
