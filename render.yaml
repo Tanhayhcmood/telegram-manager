@@ -1,28 +1,27 @@
 services:
-  - type: worker
+  - type: web
     name: tg-group-manager
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
     region: frankfurt
-    plan: starter
+    plan: free
     autoDeploy: true
+    healthCheckPath: /healthz
     # Run DB migrations at startup (buildCommand is not used with docker runtime)
     dockerCommand: sh -c "alembic upgrade head && python -m app.main"
 
     envVars:
-      # --- Secrets: enter these in the Render dashboard when the blueprint is created ---
-      - key: TELEGRAM_API_ID
-        sync: false
-      - key: TELEGRAM_API_HASH
-        sync: false
-      - key: TELEGRAM_PHONE
-        sync: false
+      # The API ID/hash use the app's defaults; the supplied session is already authorized.
       - key: TELEGRAM_SESSION_STRING
         sync: false
       - key: BOT_TOKEN
         sync: false
       - key: ADMIN_IDS
+        sync: false
+      - key: BOT_MODE
+        value: webhook
+      - key: WEBHOOK_SECRET
         sync: false
 
       # --- Linked resources ---
@@ -76,7 +75,7 @@ services:
 
   - type: keyvalue
     name: tg-manager-redis
-    plan: starter
+    plan: free
     region: frankfurt
     maxmemoryPolicy: noeviction
     ipAllowList: []
@@ -85,5 +84,5 @@ databases:
   - name: tg-manager-db
     databaseName: tgmanager
     user: tgmanager
-    plan: basic-256mb
+    plan: free
     region: frankfurt
