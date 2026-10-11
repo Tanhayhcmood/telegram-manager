@@ -8,8 +8,8 @@ services:
     plan: free
     autoDeploy: true
     healthCheckPath: /healthz
-    # Run DB migrations at startup (buildCommand is not used with docker runtime)
-    dockerCommand: sh -c "alembic upgrade head && python -m app.main"
+    # Run DB migrations before starting the app.
+    dockerCommand: ./start.sh
 
     envVars:
       # The API ID/hash use the app's defaults; the supplied session is already authorized.
