@@ -55,6 +55,31 @@ class TelegramConnectionRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await service.reconnect_if_needed())
         client.connect.assert_awaited_once()
 
+    async def test_online_presence_is_sent_on_connect_and_throttled(self) -> None:
+        class StatusClient:
+            def __init__(self) -> None:
+                self.requests = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            async def __call__(self, request) -> None:
+                self.requests.append(request)
+
+        client = StatusClient()
+        service = object.__new__(TelegramUserService)
+        service.client = client
+        service._running = True
+        service._last_presence_update = 0.0
+
+        first = await service.refresh_online_presence()
+        second = await service.refresh_online_presence()
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(len(client.requests), 1)
+        self.assertFalse(client.requests[0].offline)
+
     async def test_health_check_reconnects_and_restarts_join_queue_once(self) -> None:
         client = SimpleNamespace(get_me=AsyncMock(return_value=object()))
 
@@ -62,6 +87,7 @@ class TelegramConnectionRecoveryTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.connected = False
                 self.client = client
+                self.refresh_online_presence = AsyncMock()
                 self.reconnect_if_needed = AsyncMock(side_effect=self._reconnect)
 
             def is_running(self) -> bool:
@@ -83,6 +109,7 @@ class TelegramConnectionRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await health._check()
 
         tg.reconnect_if_needed.assert_awaited_once()
+        tg.refresh_online_presence.assert_awaited_once()
         restart_queue.assert_awaited_once()
         self.assertTrue(health.is_healthy())
         self.assertIsNotNone(health.last_ok_at())

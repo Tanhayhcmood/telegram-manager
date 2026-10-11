@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.functions.account import UpdateStatusRequest
 from telethon.tl.types import Channel, Chat, User
 from telethon.errors import (
     FloodWaitError,
@@ -18,6 +19,7 @@ from app.utils.validators import LinkValidator
 
 logger = get_logger(__name__)
 ENTITY_RESOLUTION_TIMEOUT = 20.0
+PRESENCE_REFRESH_SECONDS = 180.0
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,7 @@ class TelegramUserService:
         self._running = False
         self._desired_running = False
         self._connection_lock = asyncio.Lock()
+        self._last_presence_update = 0.0
 
     @classmethod
     def get_instance(cls) -> "TelegramUserService":
@@ -89,6 +92,13 @@ class TelegramUserService:
 
                 await self.client.get_me()
                 self._running = True
+                try:
+                    await self.refresh_online_presence(force=True)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not set Telegram online presence (%s)",
+                        type(exc).__name__,
+                    )
                 logger.info("Telegram user client connection is active")
                 return True
             except Exception:
@@ -98,6 +108,23 @@ class TelegramUserService:
     def is_expected_to_run(self) -> bool:
         """Whether an admin or startup requested that this client stay online."""
         return self._desired_running
+
+    async def refresh_online_presence(self, force: bool = False) -> bool:
+        """Ask Telegram to show this authorized user session as online."""
+        if not self.is_running():
+            return False
+
+        now = asyncio.get_running_loop().time()
+        if (
+            not force
+            and now - self._last_presence_update < PRESENCE_REFRESH_SECONDS
+        ):
+            return False
+
+        await self.client(UpdateStatusRequest(offline=False))
+        self._last_presence_update = now
+        logger.debug("Refreshed Telegram online presence")
+        return True
 
     async def stop(self) -> None:
         async with self._connection_lock:

@@ -116,6 +116,19 @@ class HealthService:
             if me is None:
                 raise RuntimeError("get_me() returned None")
 
+            refresh_presence = getattr(self._tg, "refresh_online_presence", None)
+            if refresh_presence is not None:
+                try:
+                    await asyncio.wait_for(
+                        refresh_presence(),
+                        timeout=MESSAGE_TIMEOUT,
+                    )
+                except Exception as presence_error:
+                    logger.warning(
+                        "Could not refresh Telegram online presence (%s)",
+                        type(presence_error).__name__,
+                    )
+
             self._consecutive_failures = 0
             self._last_ok = datetime.now(timezone.utc)
             self._alerted = False
