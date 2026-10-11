@@ -46,6 +46,12 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔄 همگام‌سازی گروه‌ها", callback_data="sync_dialogs"),
             InlineKeyboardButton(text="👥 همگام‌سازی مخاطبین", callback_data="sync_users"),
         ],
+        [
+            InlineKeyboardButton(
+                text="♻️ بازخوانی لینک‌های جاافتاده",
+                callback_data="backfill_links_menu",
+            ),
+        ],
     ])
 
 
@@ -124,7 +130,7 @@ async def cb_system_start(callback: CallbackQuery) -> None:
 async def cb_system_stop(callback: CallbackQuery) -> None:
     from app.services import TelegramUserService, JoinQueueService, HealthService
     tg = TelegramUserService.get_instance()
-    if not tg.is_running():
+    if not tg.is_running() and not tg.is_expected_to_run():
         await callback.answer("سیستم متوقف است.", show_alert=True)
         return
     await HealthService.get_instance().stop()

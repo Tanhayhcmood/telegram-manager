@@ -4,7 +4,7 @@ Detects soft-bans, disconnects, and session issues — alerts admins immediately
 """
 import asyncio
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from app.config import settings
 from app.database.connection import AsyncSessionLocal
@@ -28,6 +28,7 @@ class HealthService:
         self._consecutive_failures = 0
         self._last_ok: datetime | None = None
         self._alerted = False
+        self._recovery_callback: Callable[[], Awaitable[None]] | None = None
 
     @classmethod
     def get_instance(cls) -> "HealthService":
@@ -38,6 +39,9 @@ class HealthService:
     def set_tg_service(self, tg: Any) -> None:
         self._tg = tg
 
+    def set_recovery_callback(self, callback: Callable[[], Awaitable[None]]) -> None:
+        self._recovery_callback = callback
+
     async def start(self) -> None:
         if self._running:
             return
@@ -45,6 +49,7 @@ class HealthService:
         # will re-alert if it continues to fail.
         self._alerted = False
         self._consecutive_failures = 0
+        self._last_ok = None
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="health-monitor")
         logger.info("Health monitor started (interval=%ds)", CHECK_INTERVAL)
@@ -59,23 +64,49 @@ class HealthService:
                 pass
 
     def is_healthy(self) -> bool:
+        if self._tg is None or not self._tg.is_running():
+            return False
+        is_expected_to_run = getattr(self._tg, "is_expected_to_run", None)
+        if callable(is_expected_to_run) and not is_expected_to_run():
+            return False
         return self._consecutive_failures < SOFT_BAN_THRESHOLD
+
+    def is_ready(self) -> bool:
+        """Strict status for external monitors: require a recent successful Telegram probe."""
+        if not self.is_healthy() or self._consecutive_failures:
+            return False
+        if self._last_ok is None:
+            return False
+        age = (datetime.now(timezone.utc) - self._last_ok).total_seconds()
+        return age <= CHECK_INTERVAL * 2
 
     def last_ok_at(self) -> datetime | None:
         return self._last_ok
 
     async def _loop(self) -> None:
         while self._running:
-            await asyncio.sleep(CHECK_INTERVAL)
             await self._check()
+            await asyncio.sleep(CHECK_INTERVAL)
 
     async def _check(self) -> None:
         if self._tg is None:
             return
 
+        is_expected_to_run = getattr(self._tg, "is_expected_to_run", None)
+        if callable(is_expected_to_run) and not is_expected_to_run():
+            # An admin deliberately stopped the account client; do not restart it.
+            self._consecutive_failures = 0
+            self._last_ok = None
+            self._alerted = False
+            return
+
         try:
             if not self._tg.is_running():
-                raise RuntimeError("User client is not running")
+                reconnect = getattr(self._tg, "reconnect_if_needed", None)
+                if reconnect is None or not await reconnect():
+                    raise RuntimeError("User client is not running")
+                if self._recovery_callback is not None:
+                    await self._recovery_callback()
 
             # Ping Telegram — get_me() is the lightest possible API call
             me = await asyncio.wait_for(
