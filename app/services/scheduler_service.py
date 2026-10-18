@@ -38,6 +38,14 @@ class SchedulerService:
 
     def set_discovery_service(self, service: Any) -> None:
         self._discovery_service = service
+        if self._scheduler.running:
+            job = self._scheduler.get_job("scan_group_member_bios")
+            if job is not None:
+                self._scheduler.modify_job(
+                    job.id,
+                    next_run_time=datetime.now(timezone.utc),
+                )
+                logger.info("Scheduled initial member-bio scan after discovery became ready")
 
     def start(self) -> None:
         # Daily backup

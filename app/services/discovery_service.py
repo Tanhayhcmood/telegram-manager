@@ -88,6 +88,7 @@ class DiscoveryService:
                 return
 
         try:
+            logger.info("Checking message-sender bio for user_id=%d", user.id)
             bio = await self._tg.fetch_user_bio(user)
         except FloodWaitError:
             raise
@@ -98,6 +99,11 @@ class DiscoveryService:
         # Bio links are checked directly; DISCOVERY_KEYWORDS only filter message text.
         await self._process_links(bio, source)
         await self._mark_user_message_bio_checked(user.id)
+        logger.info(
+            "Checked message-sender bio for user_id=%d (bio_chars=%d)",
+            user.id,
+            len(bio),
+        )
 
     async def _mark_user_message_bio_checked(self, user_id: int) -> None:
         async with AsyncSessionLocal() as session:
@@ -108,11 +114,14 @@ class DiscoveryService:
     async def scan_joined_group_member_bios(self) -> None:
         """Gradually check bios of users in groups the account has joined."""
         if not self._tg.is_running():
-            logger.debug("Skipping member-bio scan: Telegram user client is offline")
+            logger.info("Skipping member-bio scan: Telegram user client is offline")
             return
 
         group_cutoff = datetime.now(timezone.utc) - timedelta(
             days=max(1, settings.BIO_SCAN_GROUP_RECHECK_DAYS)
+        )
+        user_cutoff = datetime.now(timezone.utc) - timedelta(
+            days=max(1, settings.BIO_SCAN_RECHECK_DAYS)
         )
         async with AsyncSessionLocal() as session:
             group_repo = GroupRepository(session)
@@ -120,10 +129,18 @@ class DiscoveryService:
                 cutoff=group_cutoff, limit=5000
             )
             scan_repo = UserBioScanRepository(session)
-            checked_users = await scan_repo.get_passively_scanned_user_ids()
+            checked_users = await scan_repo.get_passively_scanned_user_ids(user_cutoff)
         if not groups:
-            logger.debug("Member-bio scan: no joined groups to scan")
+            logger.info(
+                "Member-bio scan: no joined groups are due (group recheck=%d days)",
+                max(1, settings.BIO_SCAN_GROUP_RECHECK_DAYS),
+            )
             return
+        logger.info(
+            "Member-bio scan starting: %d eligible group(s), profile recheck=%d days",
+            len(groups),
+            max(1, settings.BIO_SCAN_RECHECK_DAYS),
+        )
 
         try:
             me = await self._tg.client.get_me()
@@ -224,6 +241,11 @@ class DiscoveryService:
                 )
             if stop_for_flood_wait or attempted_total >= max_total:
                 break
+        logger.info(
+            "Member-bio scan finished: attempted %d profile(s)%s",
+            attempted_total,
+            " before FloodWait" if stop_for_flood_wait else "",
+        )
 
     async def _mark_user_passively_scanned(self, user_id: int) -> None:
         async with AsyncSessionLocal() as session:

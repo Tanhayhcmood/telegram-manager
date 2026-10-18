@@ -21,9 +21,9 @@ class UserBioScanRepository(BaseRepository[UserBioScan]):
         )
         return result.scalar_one_or_none() is not None
 
-    async def get_passively_scanned_user_ids(self) -> set[int]:
+    async def get_passively_scanned_user_ids(self, cutoff: datetime) -> set[int]:
         result = await self._session.execute(
-            select(UserBioScan.user_id).where(UserBioScan.passive_scanned_at.is_not(None))
+            select(UserBioScan.user_id).where(UserBioScan.passive_scanned_at >= cutoff)
         )
         return {int(user_id) for user_id in result.scalars().all()}
 
