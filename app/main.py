@@ -123,7 +123,15 @@ async def _init_db() -> None:
         await conn.execute(text(
             "ALTER TABLE groups ADD COLUMN IF NOT EXISTS can_write BOOLEAN NOT NULL DEFAULT TRUE"
         ))
-    logger.info("Additive column migrations ensured (can_write)")
+        await conn.execute(text(
+            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_bio_scan_at TIMESTAMPTZ"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS bio_scan_complete_at TIMESTAMPTZ"
+        ))
+    logger.info(
+        "Additive column migrations ensured (can_write, last_bio_scan_at, bio_scan_complete_at)"
+    )
 
 
 async def _build_storage():
@@ -257,6 +265,7 @@ async def main() -> None:
         try:
             await tg.start()
             discovery = DiscoveryService(tg)
+            scheduler.set_discovery_service(discovery)
             tg.on_new_message(discovery.process_message)
             tg.on_new_message(forced_subscribe.process_message)
             asyncio.create_task(dm_polling_loop(tg.client))  # AI DM polling

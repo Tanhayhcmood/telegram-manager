@@ -25,6 +25,7 @@ class SchedulerService:
     def __init__(self) -> None:
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._bot: Any = None
+        self._discovery_service: Any = None
 
     @classmethod
     def get_instance(cls) -> "SchedulerService":
@@ -34,6 +35,9 @@ class SchedulerService:
 
     def set_bot(self, bot: Any) -> None:
         self._bot = bot
+
+    def set_discovery_service(self, service: Any) -> None:
+        self._discovery_service = service
 
     def start(self) -> None:
         # Daily backup
@@ -86,6 +90,15 @@ class SchedulerService:
             id="reload_pending_groups",
             replace_existing=True,
             misfire_grace_time=60,
+        )
+
+        # Slowly scan passive members' bios; the service enforces per-run limits and pacing.
+        self._scheduler.add_job(
+            self._scan_group_member_bios,
+            IntervalTrigger(hours=max(1, settings.BIO_SCAN_INTERVAL_HOURS)),
+            id="scan_group_member_bios",
+            replace_existing=True,
+            misfire_grace_time=600,
         )
 
         self._scheduler.start()
@@ -185,6 +198,15 @@ class SchedulerService:
             )
         except Exception as exc:
             logger.warning("Auto dialog sync failed: %s", exc)
+
+    async def _scan_group_member_bios(self) -> None:
+        if self._discovery_service is None:
+            logger.debug("Skipping member-bio scan: discovery service is not ready")
+            return
+        try:
+            await self._discovery_service.scan_joined_group_member_bios()
+        except Exception as exc:
+            logger.warning("Scheduled member-bio scan failed: %s", exc, exc_info=True)
 
     async def _daily_stats_report(self) -> None:
         try:

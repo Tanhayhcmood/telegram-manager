@@ -4,8 +4,9 @@ from .log import Log
 from .contacted_user import ContactedUser
 from .join_attempt import JoinAttempt
 from .runtime_setting import RuntimeSetting
+from .user_bio_scan import UserBioScan
 
 __all__ = [
     "Group", "GroupStatus", "DiscoveredLink", "LinkStatus", "Log",
-    "ContactedUser", "JoinAttempt", "RuntimeSetting",
+    "ContactedUser", "JoinAttempt", "RuntimeSetting", "UserBioScan",
 ]

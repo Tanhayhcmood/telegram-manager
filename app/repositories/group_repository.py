@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import select, func, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.group import Group, GroupStatus
@@ -82,6 +82,40 @@ class GroupRepository(BaseRepository[Group]):
 
     async def get_joined(self) -> list[Group]:
         return await self.get_by_status(GroupStatus.JOINED, limit=5000)
+
+    async def get_bio_scan_candidates(
+        self, cutoff: datetime, limit: int = 5000
+    ) -> list[Group]:
+        """Return joined groups least recently visited by the bio scanner first."""
+        result = await self._session.execute(
+            select(Group)
+            .where(Group.status == GroupStatus.JOINED)
+            .where(
+                or_(
+                    Group.bio_scan_complete_at.is_(None),
+                    Group.bio_scan_complete_at < cutoff,
+                )
+            )
+            .order_by(
+                Group.last_bio_scan_at.asc().nulls_first(),
+                Group.created_at.asc(),
+            )
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def mark_bio_scan(
+        self, group_id: int, scanned_at: datetime, complete: bool = False
+    ) -> bool:
+        values = {"last_bio_scan_at": scanned_at}
+        if complete:
+            values["bio_scan_complete_at"] = scanned_at
+        result = await self._session.execute(
+            update(Group)
+            .where(Group.group_id == group_id)
+            .values(**values)
+        )
+        return result.rowcount > 0
 
     async def get_broadcastable(self) -> list[Group]:
         """JOINED groups the account can actually still post in.
