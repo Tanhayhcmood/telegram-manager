@@ -13,7 +13,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.database.connection import Base, ASYNC_DATABASE_URL
-from app.models import Group, DiscoveredLink, Log, ContactedUser, JoinAttempt, RuntimeSetting  # noqa: F401 — register all models
+from app.models import Group, DiscoveredLink, Log, ContactedUser, JoinAttempt, RuntimeSetting, UserBioScan  # noqa: F401 — register all models
 
 config = context.config
 config.set_main_option("sqlalchemy.url", ASYNC_DATABASE_URL)

@@ -40,6 +40,10 @@ class Group(Base):
     # (status stays JOINED, group still shows up in live dialogs) while
     # being write-restricted — the periodic dialog sync must not reset this.
     can_write: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Last time passive member-bio discovery visited this group.
+    last_bio_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Last time the scanner finished enumerating all available group members.
+    bio_scan_complete_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

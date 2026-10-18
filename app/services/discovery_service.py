@@ -1,11 +1,17 @@
 import asyncio
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from telethon.errors import FloodWaitError
+from telethon.tl.types import User
 
 from app.config import settings
 from app.database.connection import AsyncSessionLocal
-from app.repositories import GroupRepository, DiscoveredLinkRepository, LogRepository, ContactedUserRepository
+from app.repositories import (
+    GroupRepository, DiscoveredLinkRepository, LogRepository, ContactedUserRepository,
+    UserBioScanRepository,
+)
 from app.models.group import GroupStatus
 from app.models.discovered_link import LinkStatus
 from app.utils.logger import get_logger
@@ -28,45 +34,206 @@ class DiscoveryService:
         try:
             text = event.message.text or ""
             sender_id = event.sender_id
+            keywords = settings.get_discovery_keywords()
+
+            # Keep the existing keyword filter for message text, but do not let it
+            # suppress bio checks for a sender whose message lacks a keyword.
+            await self._process_links(
+                text,
+                f"message:{event.chat_id}:{event.message.id}",
+                keywords=keywords,
+            )
 
             if sender_id and sender_id > 0:
-                await self._track_user(event)
-
-            keywords = settings.get_discovery_keywords()
-            if keywords:
-                text_lower = text.lower()
-                if not any(kw in text_lower for kw in keywords):
-                    return
-
-            links = LinkValidator.extract_links(text)
-
-            if sender_id:
                 try:
-                    bio = await self._tg.get_user_bio(sender_id)
-                    if bio:
-                        if not keywords or any(kw in bio.lower() for kw in keywords):
-                            links += LinkValidator.extract_links(bio)
-                except Exception:
-                    pass
-
-            if not links:
-                return
-
-            source = f"message:{event.chat_id}:{event.message.id}"
-            for raw_link in set(links):
-                normalized = LinkValidator.normalize(raw_link)
-                if normalized:
-                    await self._register_link(normalized, source)
+                    sender = await event.get_sender()
+                    if sender is not None:
+                        await self._track_user(sender)
+                    if isinstance(sender, User) and not sender.bot:
+                        await self._maybe_process_user_bio(
+                            sender,
+                            f"message-bio:{event.chat_id}:{event.message.id}:{sender_id}",
+                        )
+                except FloodWaitError as exc:
+                    logger.warning(
+                        "FloodWait while checking message sender bio in chat %s: %ds",
+                        event.chat_id, exc.seconds,
+                    )
+                except Exception as exc:
+                    logger.debug("Could not check message sender bio: %s", exc)
 
         except Exception as exc:
             logger.error("Error processing message: %s", exc, exc_info=True)
 
-    async def _track_user(self, event: Any) -> None:
+    async def _process_links(
+        self, text: str, source: str, keywords: list[str] | None = None
+    ) -> None:
+        if not text:
+            return
+        if keywords and not any(keyword in text.lower() for keyword in keywords):
+            return
+
+        for raw_link in set(LinkValidator.extract_links(text)):
+            normalized = LinkValidator.normalize(raw_link)
+            if normalized:
+                await self._register_link(normalized, source)
+
+    async def _maybe_process_user_bio(self, user: User, source: str) -> None:
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            days=max(1, settings.BIO_SCAN_RECHECK_DAYS)
+        )
+        async with AsyncSessionLocal() as session:
+            scan_repo = UserBioScanRepository(session)
+            if await scan_repo.is_message_checked_since(user.id, cutoff):
+                return
+
         try:
-            sender = await event.get_sender()
+            bio = await self._tg.fetch_user_bio(user)
+        except FloodWaitError:
+            raise
+        except Exception as exc:
+            logger.debug("Could not fetch bio for user %d: %s", user.id, exc)
+            return
+
+        # Bio links are checked directly; DISCOVERY_KEYWORDS only filter message text.
+        await self._process_links(bio, source)
+        await self._mark_user_message_bio_checked(user.id)
+
+    async def _mark_user_message_bio_checked(self, user_id: int) -> None:
+        async with AsyncSessionLocal() as session:
+            scan_repo = UserBioScanRepository(session)
+            await scan_repo.mark_message_checked(user_id, datetime.now(timezone.utc))
+            await session.commit()
+
+    async def scan_joined_group_member_bios(self) -> None:
+        """Gradually check bios of users in groups the account has joined."""
+        if not self._tg.is_running():
+            logger.debug("Skipping member-bio scan: Telegram user client is offline")
+            return
+
+        group_cutoff = datetime.now(timezone.utc) - timedelta(
+            days=max(1, settings.BIO_SCAN_GROUP_RECHECK_DAYS)
+        )
+        async with AsyncSessionLocal() as session:
+            group_repo = GroupRepository(session)
+            groups = await group_repo.get_bio_scan_candidates(
+                cutoff=group_cutoff, limit=5000
+            )
+            scan_repo = UserBioScanRepository(session)
+            checked_users = await scan_repo.get_passively_scanned_user_ids()
+        if not groups:
+            logger.debug("Member-bio scan: no joined groups to scan")
+            return
+
+        try:
+            me = await self._tg.client.get_me()
+            own_user_id = getattr(me, "id", None)
+        except FloodWaitError as exc:
+            logger.warning("FloodWait before member-bio scan: %ds", exc.seconds)
+            return
+        except Exception as exc:
+            logger.debug("Could not resolve current Telegram user for bio scan: %s", exc)
+            own_user_id = None
+
+        max_total = max(1, settings.BIO_SCAN_MAX_USERS_PER_RUN)
+        max_per_group = max(1, settings.BIO_SCAN_MAX_USERS_PER_GROUP)
+        delay = max(0.0, settings.BIO_SCAN_DELAY_SECONDS)
+        attempted_total = 0
+        attempted_user_ids: set[int] = set()
+        stop_for_flood_wait = False
+
+        for group in groups:
+            if attempted_total >= max_total:
+                break
+            group_id = group.group_id
+            group_attempts = 0
+            group_completed = True
+            try:
+                async for user in self._tg.iter_group_participants(group_id):
+                    if not isinstance(user, User) or user.bot or user.id == own_user_id:
+                        continue
+                    if user.id in checked_users or user.id in attempted_user_ids:
+                        continue
+                    if attempted_total >= max_total or group_attempts >= max_per_group:
+                        group_completed = False
+                        break
+
+                    attempted_total += 1
+                    group_attempts += 1
+                    attempted_user_ids.add(user.id)
+                    try:
+                        bio = await self._tg.fetch_user_bio(user)
+                    except FloodWaitError as exc:
+                        logger.warning(
+                            "FloodWait scanning member bios in group %d: %ds; pausing this run",
+                            group_id, exc.seconds,
+                        )
+                        stop_for_flood_wait = True
+                        break
+                    except Exception as exc:
+                        logger.debug(
+                            "Could not fetch bio for user %d in group %d: %s",
+                            user.id, group_id, exc,
+                        )
+                        checked_users.add(user.id)
+                        await self._mark_user_passively_scanned(user.id)
+                    else:
+                        await self._process_links(
+                            bio, f"member-bio:{group_id}:{user.id}"
+                        )
+                        checked_users.add(user.id)
+                        await self._mark_user_passively_scanned(user.id)
+                    finally:
+                        if delay and not stop_for_flood_wait:
+                            await asyncio.sleep(delay)
+
+                    if stop_for_flood_wait:
+                        break
+            except FloodWaitError as exc:
+                logger.warning(
+                    "FloodWait listing members of group %d: %ds; pausing this run",
+                    group_id, exc.seconds,
+                )
+                stop_for_flood_wait = True
+                group_completed = False
+            except Exception as exc:
+                logger.warning(
+                    "Could not list members of group %d (%r) for bio scan: %s",
+                    group_id, group.title, exc,
+                )
+                group_completed = False
+
+            # Rotate groups even when one is inaccessible or hits a rate limit.
+            try:
+                async with AsyncSessionLocal() as session:
+                    repo = GroupRepository(session)
+                    await repo.mark_bio_scan(
+                        group_id,
+                        datetime.now(timezone.utc),
+                        complete=group_completed,
+                    )
+                    await session.commit()
+            except Exception as exc:
+                logger.warning("Could not save bio-scan time for group %d: %s", group_id, exc)
+
+            if group_attempts:
+                logger.info(
+                    "Member-bio scan checked %d users in group %d (%r); run total=%d/%d",
+                    group_attempts, group_id, group.title, attempted_total, max_total,
+                )
+            if stop_for_flood_wait or attempted_total >= max_total:
+                break
+
+    async def _mark_user_passively_scanned(self, user_id: int) -> None:
+        async with AsyncSessionLocal() as session:
+            scan_repo = UserBioScanRepository(session)
+            await scan_repo.mark_passively_scanned(user_id, datetime.now(timezone.utc))
+            await session.commit()
+
+    async def _track_user(self, sender: Any) -> None:
+        try:
             if sender is None:
                 return
-            from telethon.tl.types import User
             if not isinstance(sender, User) or sender.bot:
                 return
             async with AsyncSessionLocal() as session:

@@ -2,7 +2,7 @@ import asyncio
 import random
 import re
 from io import BytesIO
-from typing import Any
+from typing import Any, AsyncIterator
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel, Chat, User, ChatInvite, ChatInviteAlready
@@ -261,16 +261,29 @@ class TelegramUserService:
             getattr(entity, "participants_count", None),
         )
 
+    async def fetch_user_bio(self, user: int | User) -> str:
+        """Fetch a bio and let the caller handle Telegram rate limits/errors."""
+        entity = user if isinstance(user, User) else await self.client.get_entity(user)
+        if not isinstance(entity, User):
+            return ""
+        from telethon.tl.functions.users import GetFullUserRequest
+        info = await self.client(GetFullUserRequest(entity))
+        return getattr(info.full_user, "about", "") or ""
+
     async def get_user_bio(self, user_id: int) -> str:
+        """Backward-compatible best-effort bio lookup."""
         try:
-            full = await self.client.get_entity(user_id)
-            if isinstance(full, User):
-                from telethon.tl.functions.users import GetFullUserRequest
-                info = await self.client(GetFullUserRequest(full))
-                return getattr(info.full_user, "about", "") or ""
-        except Exception:
-            pass
-        return ""
+            return await self.fetch_user_bio(user_id)
+        except Exception as exc:
+            logger.debug("Could not fetch bio for user %d: %s", user_id, exc)
+            return ""
+
+    async def iter_group_participants(self, group_id: int) -> AsyncIterator[User]:
+        """Yield user accounts from a joined basic group or supergroup."""
+        entity = await self.client.get_entity(group_id)
+        async for participant in self.client.iter_participants(entity):
+            if isinstance(participant, User):
+                yield participant
 
     async def join_group(self, link: str) -> tuple[bool, int | None, str | None]:
         """

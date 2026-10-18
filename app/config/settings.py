@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     # ── Discovery ──────────────────────────────────────────────────────────────
     DISCOVERY_KEYWORDS: str = ""
 
+    # Group-member bio discovery: bounded, paced scans avoid bursts of profile requests.
+    BIO_SCAN_INTERVAL_HOURS: int = 6
+    BIO_SCAN_MAX_USERS_PER_RUN: int = 100
+    BIO_SCAN_MAX_USERS_PER_GROUP: int = 25
+    BIO_SCAN_RECHECK_DAYS: int = 30
+    BIO_SCAN_GROUP_RECHECK_DAYS: int = 7
+    BIO_SCAN_DELAY_SECONDS: float = 1.0
+
     # ── Daily join limit ───────────────────────────────────────────────────────
     MAX_JOINS_PER_DAY: int = 30
 
