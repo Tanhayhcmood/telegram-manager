@@ -11,10 +11,13 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.types import Update
 
 from app.config import settings
+from app.safety import AUTOMATED_GROUP_JOINS_ENABLED
 from app.utils.logger import get_logger, setup_logging
 from app.database.connection import engine, Base, AsyncSessionLocal
 from app.handlers import get_main_router
 from app.middlewares import AdminAuthMiddleware
+from app.services.discovery_service import DiscoveryService
+from app.services.join_queue_service import JoinQueueService
 from app.services import (
     TelegramUserService,
     NotificationService,
@@ -178,11 +181,26 @@ async def main() -> None:
     ns = NotificationService.get_instance()
     ns.set_bot(bot)
 
-    # This deployment runs only the Bot API client. The Telegram user-account
-    # client, link discovery, and automated join queue stay disabled.
+    # Start the user client only for automatic group joining; bulk broadcasts
+    # remain disabled by the separate safety policy.
     tg = TelegramUserService.get_instance()
+    jq = JoinQueueService.get_instance()
+    jq.set_tg_service(tg)
     health = HealthService.get_instance()
     health.set_tg_service(tg)
+    if AUTOMATED_GROUP_JOINS_ENABLED:
+        discovery_service = DiscoveryService(tg)
+        tg.on_new_message(discovery_service.process_message)
+        health.set_recovery_callback(jq.start)
+        try:
+            await tg.start()
+            await jq.start()
+            logger.info("Telegram user client, link discovery, and automatic join queue started")
+        except Exception as exc:
+            logger.error(
+                "Telegram client / automatic join startup failed: %s",
+                exc, exc_info=True,
+            )
     await health.start()
 
     scheduler = SchedulerService.get_instance()
