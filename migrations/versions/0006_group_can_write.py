@@ -14,7 +14,6 @@ Create Date: 2026-07-08 00:00:00.000000
 """
 from typing import Sequence, Union
 
-import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0006"
@@ -24,9 +23,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "groups",
-        sa.Column("can_write", sa.Boolean(), nullable=False, server_default=sa.true()),
+    # The application may have added this column before Alembic ran.
+    op.execute(
+        "ALTER TABLE groups "
+        "ADD COLUMN IF NOT EXISTS can_write BOOLEAN NOT NULL DEFAULT TRUE"
     )
 
 

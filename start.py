@@ -47,10 +47,21 @@ async def _read_schema_state() -> tuple[bool, bool]:
 
 
 def _run_alembic(*arguments: str) -> None:
-    subprocess.run(
-        [sys.executable, "-m", "alembic", *arguments],
-        check=True,
+    command = [sys.executable, "-m", "alembic", *arguments]
+    result = subprocess.run(
+        command,
+        check=False,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
     )
+    if result.returncode:
+        print(
+            f"Alembic {' '.join(arguments)} failed with exit code "
+            f"{result.returncode}; full output is above.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(result.returncode)
 
 
 def main() -> None:
