@@ -12,6 +12,7 @@ class LinkStatus(str, enum.Enum):
     REJECTED = "rejected"
     JOINED = "joined"
     FAILED = "failed"
+    SKIPPED_NOT_GROUP = "skipped_not_group"
 
 
 class DiscoveredLink(Base):

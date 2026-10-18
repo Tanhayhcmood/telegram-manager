@@ -31,4 +31,4 @@ ENV LOG_JSON=true
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))" || exit 1
 
-CMD ["python", "-m", "app.main"]
+CMD ["python", "start.py"]
