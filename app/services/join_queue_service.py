@@ -14,8 +14,9 @@ Key guarantees:
 """
 import asyncio
 import random
-from datetime import date, datetime, timezone, timedelta
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from html import escape
 from typing import Any
 
 from app.config import settings
@@ -431,6 +432,16 @@ class JoinQueueService:
                 self._requeue_after_delay(task, wait_secs),
                 name=f"flood-requeue-{task.group_id}",
             )
+            await self._notify_admins(
+                task,
+                event="flood_wait",
+                message=(
+                    f"⏳ <b>محدودیت موقت عضویت (FloodWait)</b>\n"
+                    f"گروه: <code>{escape(task.title or str(task.group_id))}</code>\n"
+                    f"شناسه: <code>{task.group_id}</code>\n"
+                    f"تلاش مجدد پس از <b>{wait_secs} ثانیه</b>."
+                ),
+            )
             # Keep DB status as PENDING — group is not failed, just rate-limited
             return
 
@@ -449,18 +460,16 @@ class JoinQueueService:
                 self._requeue_after_delay(task, pause_secs + 120),
                 name=f"peer-flood-requeue-{task.group_id}",
             )
-            try:
-                from app.services.notification_service import NotificationService
-                ns = NotificationService.get_instance()
-                await ns.notify_critical(
-                    "🚫 PeerFlood — صف متوقف شد",
-                    f"حساب کاربری موقتاً توسط تلگرام محدود شد (PeerFlood).\n"
-                    f"صف عضویت برای <b>2 ساعت</b> متوقف شد.\n"
-                    f"گروه فعلی: <code>{task.title or task.group_id}</code>\n"
-                    f"وضعیت: <b>PENDING</b> (تلاش مجدد بعد از رفع محدودیت)",
-                )
-            except Exception:
-                pass
+            await self._notify_admins(
+                task,
+                event="peer_flood",
+                message=(
+                    "🚫 <b>محدودیت PeerFlood — صف متوقف شد</b>\n"
+                    "صف عضویت برای <b>2 ساعت</b> متوقف شد.\n"
+                    f"گروه: <code>{escape(task.title or str(task.group_id))}</code>\n"
+                    f"شناسه: <code>{task.group_id}</code>"
+                ),
+            )
             # Keep DB status as PENDING — not a permanent failure
             return
 
@@ -555,11 +564,34 @@ class JoinQueueService:
 
             await session.commit()
 
-        # Notify admins: only on FAILED joins.
-        # request_pending_approval is NOT a failure — it's a pending approval.
+        # A sent join request is not a completed membership; notify only when
+        # the account actually joined or the attempt failed.
         is_request_pending = (join_error == "request_pending_approval")
-        if settings.get_admin_id_list() and not success and not is_request_pending:
-            await self._notify_admins(task, success)
+        notification_group_id = real_group_id or task.group_id
+        if success and not is_request_pending:
+            await self._notify_admins(
+                task,
+                event="join_success",
+                group_id=notification_group_id,
+                message=(
+                    "✅ <b>عضویت موفق</b>\n"
+                    f"گروه: <code>{escape(task.title or str(notification_group_id))}</code>\n"
+                    f"شناسه: <code>{notification_group_id}</code>\n"
+                    f"امروز: <code>{self._daily_join_count}/"
+                    f"{settings.MAX_JOINS_PER_DAY}</code>"
+                ),
+            )
+        elif not success and not is_request_pending:
+            await self._notify_admins(
+                task,
+                event="join_failed",
+                message=(
+                    "❌ <b>عضویت ناموفق</b>\n"
+                    f"گروه: <code>{escape(task.title or str(task.group_id))}</code>\n"
+                    f"شناسه: <code>{task.group_id}</code>\n"
+                    f"توضیح: <code>{escape((join_error or 'unknown error')[:120])}</code>"
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -581,34 +613,41 @@ class JoinQueueService:
 
     async def _notify_daily_limit(self, task: JoinTask, wait_secs: float) -> None:
         """Notify admins that the daily join limit has been reached."""
-        try:
-            from app.services.notification_service import NotificationService
-            ns = NotificationService.get_instance()
-            hours = wait_secs / 3600
-            await ns.notify(
+        hours = wait_secs / 3600
+        await self._notify_admins(
+            task,
+            event="daily_limit",
+            message=(
                 f"⏸ <b>محدودیت روزانه عضویت</b>\n\n"
                 f"سهمیه روزانه به پایان رسید: "
                 f"<code>{self._daily_join_count}/{settings.MAX_JOINS_PER_DAY}</code>\n"
-                f"گروه <code>{task.title or task.group_id}</code> در صف انتظار شب است.\n"
+                f"گروه <code>{escape(task.title or str(task.group_id))}</code> در صف انتظار شب است.\n"
                 f"ادامه کار در: <b>{hours:.1f} ساعت دیگر</b> (نیمه‌شب UTC)",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
+            ),
+        )
 
-    async def _notify_admins(self, task: JoinTask, success: bool) -> None:
+    async def _notify_admins(
+        self,
+        task: JoinTask,
+        event: str,
+        message: str,
+        group_id: int | None = None,
+    ) -> None:
+        """Send a best-effort admin notification without interrupting the queue."""
+        notification_group_id = group_id if group_id is not None else task.group_id
         try:
             from app.services.notification_service import NotificationService
             ns = NotificationService.get_instance()
-            emoji = "✅" if success else "❌"
-            title = task.title or str(task.group_id)
-            await ns.notify(
-                f"{emoji} <b>عضویت {'موفق' if success else 'ناموفق'}</b>\n"
-                f"گروه: <code>{title}</code>\n"
-                f"شناسه: <code>{task.group_id}</code>\n"
-                f"تلاش: <code>{task.attempt_number}</code>\n"
-                f"امروز: <code>{self._daily_join_count}/{settings.MAX_JOINS_PER_DAY}</code>",
-                parse_mode="HTML",
+            logger.info(
+                "Sending %s notification to admins for group_id=%d",
+                event,
+                notification_group_id,
             )
-        except Exception:
-            pass
+            await ns.notify(message, parse_mode="HTML")
+        except Exception as exc:
+            logger.warning(
+                "Failed to send %s notification for group_id=%d (%s)",
+                event,
+                notification_group_id,
+                type(exc).__name__,
+            )
