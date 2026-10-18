@@ -1,6 +1,6 @@
 """Hard safety policy for the Render deployment branch."""
 
-# The safe deployment does not automate joining Telegram groups or bulk messaging.
+# Automatic group joining is enabled; bulk messaging remains disabled.
 TELEGRAM_USER_ACCOUNT_ENABLED = True
 AUTOMATED_GROUP_JOINS_ENABLED = True
 BULK_BROADCASTS_ENABLED = False
