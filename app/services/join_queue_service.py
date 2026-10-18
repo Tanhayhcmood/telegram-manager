@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
+from app.safety import AUTOMATED_GROUP_JOINS_ENABLED
 from app.database.connection import AsyncSessionLocal
 from app.repositories import GroupRepository, LogRepository
 from app.repositories.join_attempt_repository import JoinAttemptRepository
@@ -47,11 +48,15 @@ class JoinQueueService:
         self._tg = tg
 
     async def enqueue(self, group_id: int, link: str, title: str | None, attempt: int = 1) -> None:
+        if not AUTOMATED_GROUP_JOINS_ENABLED:
+            raise RuntimeError("Automated group joining is disabled in this deployment.")
         task = JoinTask(group_id=group_id, link=link, title=title, attempt_number=attempt)
         await self._queue.put(task)
         logger.info("Queued join task: group_id=%d title=%r queue_size=%d", group_id, title, self._queue.qsize())
 
     async def start(self) -> None:
+        if not AUTOMATED_GROUP_JOINS_ENABLED:
+            raise RuntimeError("Automated group joining is disabled in this deployment.")
         if self._running:
             return
         self._running = True
@@ -88,6 +93,9 @@ class JoinQueueService:
                 self._queue.task_done()
 
     async def _process(self, task: JoinTask) -> None:
+        if not AUTOMATED_GROUP_JOINS_ENABLED:
+            logger.warning("Dropping queued join because automated joining is disabled")
+            return
         # Fail fast: check TelegramUserService before doing anything
         if self._tg is None:
             logger.error("TelegramUserService not set on JoinQueueService — dropping task for group_id=%d", task.group_id)

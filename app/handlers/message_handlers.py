@@ -9,6 +9,7 @@ from app.database.connection import AsyncSessionLocal
 from app.repositories import GroupRepository
 from app.models.group import GroupStatus
 from app.services.broadcast_queue_service import BroadcastQueueService
+from app.safety import BULK_BROADCASTS_ENABLED
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -97,7 +98,6 @@ async def cb_confirm_content(callback: CallbackQuery, state: FSMContext) -> None
             InlineKeyboardButton(text=f"📤 {title}", callback_data=f"send_to:{g.group_id}")
         ])
 
-    buttons.append([InlineKeyboardButton(text="📤 ارسال به همه (پس‌زمینه)", callback_data="send_to_all")])
     buttons.append([InlineKeyboardButton(text="🔙 لغو", callback_data="cancel_send")])
 
     await callback.message.edit_text(  # type: ignore[union-attr]
@@ -127,7 +127,11 @@ async def cb_send_to_group(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "send_to_all", SendMessageStates.selecting_targets)
 async def cb_send_to_all(callback: CallbackQuery, state: FSMContext) -> None:
-    """Delegate to BroadcastQueueService — non-blocking, runs in background."""
+    """Bulk messaging is disabled in the safe Render deployment."""
+    if not BULK_BROADCASTS_ENABLED:
+        await state.clear()
+        await callback.answer("ارسال همگانی در این نسخه غیرفعال است.", show_alert=True)
+        return
     data = await state.get_data()
     await state.clear()
     bqs = BroadcastQueueService.get_instance()

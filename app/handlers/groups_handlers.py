@@ -5,6 +5,7 @@ from app.database.connection import AsyncSessionLocal
 from app.repositories import GroupRepository
 from app.repositories.join_attempt_repository import JoinAttemptRepository
 from app.models.group import GroupStatus
+from app.safety import AUTOMATED_GROUP_JOINS_ENABLED
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -184,11 +185,6 @@ async def cb_groups_failed(callback: CallbackQuery) -> None:
     for g in groups:
         title = (g.title or str(g.group_id))[:25]
         lines.append(f"• <code>{g.group_id}</code> — {title}")
-        btns.append([
-            InlineKeyboardButton(text=f"🔄 تلاش مجدد: {title}", callback_data=f"retry_join:{g.group_id}")
-        ])
-
-    btns.append([InlineKeyboardButton(text="🔄 تلاش مجدد همه", callback_data="retry_all_failed")])
     btns.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="main_menu")])
 
     await callback.message.edit_text(  # type: ignore[union-attr]
@@ -200,6 +196,9 @@ async def cb_groups_failed(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("retry_join:"))
 async def cb_retry_join(callback: CallbackQuery) -> None:
+    if not AUTOMATED_GROUP_JOINS_ENABLED:
+        await callback.answer("عضویت خودکار در این نسخه غیرفعال است.", show_alert=True)
+        return
     group_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)
@@ -223,6 +222,9 @@ async def cb_retry_join(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "retry_all_failed")
 async def cb_retry_all_failed(callback: CallbackQuery) -> None:
+    if not AUTOMATED_GROUP_JOINS_ENABLED:
+        await callback.answer("عضویت خودکار در این نسخه غیرفعال است.", show_alert=True)
+        return
     await callback.answer("⏳ در حال افزودن به صف...")
     async with AsyncSessionLocal() as session:
         repo = GroupRepository(session)

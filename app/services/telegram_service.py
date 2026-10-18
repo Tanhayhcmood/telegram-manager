@@ -12,6 +12,7 @@ from telethon.errors import (
 )
 
 from app.config import settings
+from app.safety import AUTOMATED_GROUP_JOINS_ENABLED, TELEGRAM_USER_ACCOUNT_ENABLED
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,6 +46,8 @@ class TelegramUserService:
         return cls._instance
 
     async def start(self) -> None:
+        if not TELEGRAM_USER_ACCOUNT_ENABLED:
+            raise RuntimeError("Telegram user-account automation is disabled in this deployment.")
         self._desired_running = True
         if not await self.reconnect_if_needed():
             raise RuntimeError("Telegram client start was cancelled.")
@@ -121,6 +124,9 @@ class TelegramUserService:
         return ""
 
     async def join_group(self, link: str) -> bool:
+        if not AUTOMATED_GROUP_JOINS_ENABLED:
+            logger.warning("Automated group joining is disabled in this deployment")
+            return False
         try:
             from telethon.tl.functions.channels import JoinChannelRequest
             await self.client(JoinChannelRequest(link))

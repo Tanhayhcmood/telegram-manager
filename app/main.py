@@ -17,8 +17,6 @@ from app.handlers import get_main_router
 from app.middlewares import AdminAuthMiddleware
 from app.services import (
     TelegramUserService,
-    DiscoveryService,
-    JoinQueueService,
     NotificationService,
     HealthService,
     SchedulerService,
@@ -180,34 +178,15 @@ async def main() -> None:
     ns = NotificationService.get_instance()
     ns.set_bot(bot)
 
+    # This deployment runs only the Bot API client. The Telegram user-account
+    # client, link discovery, and automated join queue stay disabled.
     tg = TelegramUserService.get_instance()
-    jq = JoinQueueService.get_instance()
-    jq.set_tg_service(tg)
-
     health = HealthService.get_instance()
     health.set_tg_service(tg)
-    health.set_recovery_callback(jq.start)
+    await health.start()
 
     scheduler = SchedulerService.get_instance()
     scheduler.set_bot(bot)
-
-    # Start user client (non-fatal if session not yet configured)
-    async def _start_client_safe() -> None:
-        discovery = DiscoveryService(tg)
-        tg.on_new_message(discovery.process_message)
-        try:
-            await tg.start()
-            await jq.start()
-            logger.info("User client, join queue, and health monitor started")
-        except RuntimeError as exc:
-            logger.error("User client startup failed: %s", exc)
-            await ns.notify_critical("User Client ناموفق", str(exc)[:300])
-        except Exception as exc:
-            logger.error("Unexpected startup error: %s", exc, exc_info=True)
-        finally:
-            await health.start()
-
-    asyncio.create_task(_start_client_safe())
     scheduler.start()
 
     webhook_runner = None
