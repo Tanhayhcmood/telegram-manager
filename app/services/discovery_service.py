@@ -169,6 +169,7 @@ class DiscoveryService:
                             group_id, exc.seconds,
                         )
                         stop_for_flood_wait = True
+                        group_completed = False
                         break
                     except Exception as exc:
                         logger.debug(
