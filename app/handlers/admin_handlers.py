@@ -3,6 +3,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 
+from app.safety import TELEGRAM_USER_ACCOUNT_ENABLED
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -19,10 +20,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="⏳ در انتظار بررسی", callback_data="groups_pending"),
             InlineKeyboardButton(text="🔴 ناموفق‌ها", callback_data="groups_failed"),
         ],
-        [
-            InlineKeyboardButton(text="📨 ارسال به گروه", callback_data="send_message"),
-            InlineKeyboardButton(text="📢 ارسال همگانی", callback_data="broadcast"),
-        ],
+        [InlineKeyboardButton(text="📨 ارسال به یک گروه", callback_data="send_message")],
         [
             InlineKeyboardButton(text="📥 خروجی داده", callback_data="export_menu"),
             InlineKeyboardButton(text="🚨 گزارش خطاها", callback_data="error_logs"),
@@ -32,25 +30,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="❤️ وضعیت سیستم", callback_data="system_health"),
         ],
         [
-            InlineKeyboardButton(text="▶️ شروع سیستم", callback_data="system_start"),
-            InlineKeyboardButton(text="⏹ توقف سیستم", callback_data="system_stop"),
-        ],
-        [
-            InlineKeyboardButton(text="📋 وضعیت صف عضویت", callback_data="queue_status"),
-            InlineKeyboardButton(text="⚙️ فاصله عضویت", callback_data="join_delay_menu"),
-        ],
-        [
             InlineKeyboardButton(text="🆕 ۲ گروه اخیر", callback_data="recent_groups"),
-        ],
-        [
-            InlineKeyboardButton(text="🔄 همگام‌سازی گروه‌ها", callback_data="sync_dialogs"),
-            InlineKeyboardButton(text="👥 همگام‌سازی مخاطبین", callback_data="sync_users"),
-        ],
-        [
-            InlineKeyboardButton(
-                text="♻️ بازخوانی لینک‌های جاافتاده",
-                callback_data="backfill_links_menu",
-            ),
         ],
     ])
 
@@ -110,6 +90,9 @@ async def cb_system_health(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "system_start")
 async def cb_system_start(callback: CallbackQuery) -> None:
+    if not TELEGRAM_USER_ACCOUNT_ENABLED:
+        await callback.answer("حساب کاربری تلگرام در این نسخه غیرفعال است.", show_alert=True)
+        return
     from app.services import TelegramUserService, JoinQueueService, HealthService
     tg = TelegramUserService.get_instance()
     if tg.is_running():

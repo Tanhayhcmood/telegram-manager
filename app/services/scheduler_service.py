@@ -14,6 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
+from app.safety import AUTOMATED_GROUP_JOINS_ENABLED
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -46,7 +47,7 @@ class SchedulerService:
         )
 
         # Auto-retry failed joins
-        if settings.RETRY_FAILED_JOINS:
+        if settings.RETRY_FAILED_JOINS and AUTOMATED_GROUP_JOINS_ENABLED:
             self._scheduler.add_job(
                 self._retry_failed_joins,
                 IntervalTrigger(hours=settings.RETRY_INTERVAL_HOURS),

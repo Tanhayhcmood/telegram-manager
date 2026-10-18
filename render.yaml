@@ -12,9 +12,7 @@ services:
     dockerCommand: ./start.sh
 
     envVars:
-      # The API ID/hash use the app's defaults; the supplied session is already authorized.
-      - key: TELEGRAM_SESSION_STRING
-        sync: false
+      # The safe deployment keeps the Telegram user-account client disabled.
       - key: BOT_TOKEN
         sync: false
       - key: ADMIN_IDS
@@ -22,7 +20,7 @@ services:
       - key: BOT_MODE
         value: webhook
       - key: WEBHOOK_SECRET
-        sync: false
+        generateValue: true
 
       # --- Linked resources ---
       - key: DATABASE_URL
@@ -42,18 +40,6 @@ services:
       - key: BACKUP_KEEP_DAYS
         value: "7"
       - key: BACKUP_DAILY_HOUR
-        value: "3"
-      - key: MAX_JOINS_PER_DAY
-        value: "50"
-      - key: JOIN_DELAY_MIN
-        value: "240"
-      - key: JOIN_DELAY_MAX
-        value: "480"
-      - key: RETRY_FAILED_JOINS
-        value: "true"
-      - key: RETRY_INTERVAL_HOURS
-        value: "6"
-      - key: RETRY_MAX_ATTEMPTS
         value: "3"
 
       # --- Optional ---

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config import settings
+from app.safety import BULK_BROADCASTS_ENABLED
 from app.database.connection import AsyncSessionLocal
 from app.repositories import GroupRepository, ContactedUserRepository, LogRepository
 from app.models.group import GroupStatus
@@ -66,6 +67,8 @@ class BroadcastQueueService:
         actor_id: int,
         bot: Any,
     ) -> str:
+        if not BULK_BROADCASTS_ENABLED:
+            raise RuntimeError("Bulk broadcasts are disabled in this deployment.")
         if self._active:
             raise RuntimeError("یک broadcast در حال اجرا است. لطفاً صبر کنید.")
 
